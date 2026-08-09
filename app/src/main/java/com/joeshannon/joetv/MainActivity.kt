@@ -1,20 +1,17 @@
 package com.joeshannon.joetv
 
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.joeshannon.joetv.screens.HomeScreen
-import com.joeshannon.joetv.system.ShizukuManager
 import com.joeshannon.joetv.ui.theme.JoeTVTheme
-import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
 
@@ -24,44 +21,6 @@ class MainActivity : ComponentActivity() {
     private val hideBarsRunnable = Runnable {
         hideSystemBars()
     }
-
-    private val shizukuBinderListener =
-        Shizuku.OnBinderReceivedListener {
-            Log.d(
-                "JoeTV",
-                "Shizuku binder received"
-            )
-
-            connectAndTestShizuku()
-        }
-
-    private val shizukuPermissionListener =
-        Shizuku.OnRequestPermissionResultListener {
-                requestCode,
-                grantResult ->
-
-            if (
-                requestCode ==
-                ShizukuManager.PERMISSION_REQUEST_CODE
-            ) {
-                if (
-                    grantResult ==
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    Log.d(
-                        "JoeTV",
-                        "Shizuku permission granted"
-                    )
-
-                    connectAndTestShizuku()
-                } else {
-                    Log.e(
-                        "JoeTV",
-                        "Shizuku permission denied"
-                    )
-                }
-            }
-        }
 
     override fun onCreate(
         savedInstanceState: Bundle?
@@ -75,51 +34,19 @@ class MainActivity : ComponentActivity() {
 
         hideSystemBars()
 
-        Shizuku.addBinderReceivedListenerSticky(
-            shizukuBinderListener
-        )
-
-        Shizuku.addRequestPermissionResultListener(
-            shizukuPermissionListener
-        )
-
         setContent {
             JoeTVTheme {
+
+                BackHandler {
+                    // JoeTV is the root HOME launcher.
+                    // Back should not close the launcher.
+                }
+
                 HomeScreen(
                     context = this@MainActivity
                 )
             }
         }
-    }
-
-    private fun connectAndTestShizuku() {
-        ShizukuManager.bind(
-            context = this,
-            onConnected = {
-                Log.d(
-                    "JoeTV",
-                    "CONNECTED TO SHIZUKU USER SERVICE"
-                )
-
-                val result =
-                    ShizukuManager.setTvMode()
-
-                Log.d(
-                    "JoeTV",
-                    "TV mode result: ${
-                        result.getOrElse {
-                            it.message ?: "Unknown error"
-                        }
-                    }"
-                )
-            },
-            onError = { message ->
-                Log.e(
-                    "JoeTV",
-                    "Shizuku error: $message"
-                )
-            }
-        )
     }
 
     override fun onResume() {
@@ -155,7 +82,9 @@ class MainActivity : ComponentActivity() {
     override fun onConfigurationChanged(
         newConfig: Configuration
     ) {
-        super.onConfigurationChanged(newConfig)
+        super.onConfigurationChanged(
+            newConfig
+        )
 
         hideSystemBars()
 
@@ -175,14 +104,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        Shizuku.removeBinderReceivedListener(
-            shizukuBinderListener
-        )
-
-        Shizuku.removeRequestPermissionResultListener(
-            shizukuPermissionListener
-        )
-
         mainHandler.removeCallbacks(
             hideBarsRunnable
         )

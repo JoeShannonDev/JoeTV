@@ -1,10 +1,35 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
 
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use {
+            load(it)
+        }
+    }
+}
+
+val googleClientId =
+    localProperties.getProperty(
+        "JOETV_GOOGLE_CLIENT_ID",
+        ""
+    )
+
+val googleClientSecret =
+    localProperties.getProperty(
+        "JOETV_GOOGLE_CLIENT_SECRET",
+        ""
+    )
+
 android {
     namespace = "com.joeshannon.joetv"
+
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -18,6 +43,17 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        buildConfigField(
+            "String",
+            "GOOGLE_CLIENT_ID",
+            "\"$googleClientId\""
+        )
+
+        buildConfigField(
+            "String",
+            "GOOGLE_CLIENT_SECRET",
+            "\"$googleClientSecret\""
+        )
     }
 
     buildTypes {
@@ -27,13 +63,15 @@ android {
             }
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
     buildFeatures {
         compose = true
-        aidl = true
+        buildConfig = true
     }
 }
 
@@ -48,10 +86,13 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.tv.foundation)
     implementation(libs.androidx.tv.material)
+
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

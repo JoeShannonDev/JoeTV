@@ -1,3 +1,4 @@
+
 package com.joeshannon.joetv.screens
 
 // -----------------------------------------------------------------------------
@@ -644,6 +645,10 @@ private enum class WeatherScene {
     SNOW
 }
 
+
+
+
+
 private fun weatherSceneFor(code: Int): WeatherScene = when (code) {
     0 -> WeatherScene.CLEAR
     1, 2 -> WeatherScene.PARTLY_CLOUDY
@@ -875,7 +880,7 @@ private fun JoeTvHeroTv(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(
-                modifier = Modifier.weight(1.35f)
+                modifier = Modifier.weight(1f)
             ) {
                 Text(
                     text = "JOETV",
@@ -890,7 +895,7 @@ private fun JoeTvHeroTv(
                 Text(
                     text = greeting,
                     color = Color.White,
-                    fontSize = 26.sp,
+                    fontSize = 23.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1
                 )
@@ -926,19 +931,17 @@ private fun JoeTvHeroTv(
             CalendarHeroCard(
                 event = nextEvent,
                 permissionGranted = calendarPermissionGranted,
-                modifier = Modifier.width(175.dp),
-                onClick = {
-                    if (!calendarPermissionGranted) {
-                        onRequestCalendarPermission()
-                    }
-                }
+                modifier = Modifier
+                    .width(175.dp)
+                    .height(135.dp),
+                onClick = { }
             )
 
             Spacer(modifier = Modifier.width(14.dp))
 
             WeatherHeroCard(
                 weather = weather,
-                cardWidth = 210.dp,
+                cardWidth = 175.dp,
                 cardHeight = 135.dp,
                 temperatureFontSize = 29.sp,
                 conditionFontSize = 11.sp,
@@ -948,7 +951,6 @@ private fun JoeTvHeroTv(
         }
     }
 }
-
 
 /**
  * Calendar preview shown in the TV hero.
