@@ -1,4 +1,3 @@
-
 package com.joeshannon.joetv.screens
 
 // -----------------------------------------------------------------------------
@@ -89,6 +88,7 @@ import kotlinx.coroutines.withContext
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import android.content.ActivityNotFoundException
@@ -99,6 +99,9 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.joeshannon.joetv.calendar.GoogleCalendarConnectScreen
+import com.joeshannon.joetv.calendar.GoogleCalendarApi
+import com.joeshannon.joetv.calendar.GoogleCalendarEvent
 
 
 
@@ -121,6 +124,19 @@ data class JoeTvApp(
  */
 @Composable
 fun HomeScreen(context: Context) {
+
+    var showGoogleCalendarConnect by remember {
+        mutableStateOf(false)
+    }
+
+    if (showGoogleCalendarConnect) {
+        GoogleCalendarConnectScreen(
+            onConnected = {
+                showGoogleCalendarConnect = false
+            }
+        )
+        return
+    }
 
     var calendarPermissionGranted by remember {
         mutableStateOf(
@@ -337,9 +353,7 @@ fun HomeScreen(context: Context) {
                     context = context,
                     calendarPermissionGranted = calendarPermissionGranted,
                     onRequestCalendarPermission = {
-                        calendarPermissionLauncher.launch(
-                            Manifest.permission.READ_CALENDAR
-                        )
+                        showGoogleCalendarConnect = true
                     }
                 )
             }
@@ -347,7 +361,7 @@ fun HomeScreen(context: Context) {
             item {
                 SectionHeader(
                     title = "Favorites",
-                    subtitle = "Press the bookmark button to add or remove apps"
+                    subtitle = "Press Page Down to add or remove apps"
                 )
             }
 
@@ -415,7 +429,7 @@ fun HomeScreen(context: Context) {
             item {
                 SectionHeader(
                     title = "Your Apps",
-                    subtitle = "OK to open  •  Bookmark to favorite  •  X to hide"
+                    subtitle = "OK to open  •  Page Down to favorite  •  X to hide"
                 )
             }
 
@@ -793,7 +807,7 @@ private fun rememberHeroState(): Triple<LocalDateTime, WeatherInfo?, String> {
     }
 
     val greeting = when (currentTime.hour) {
-        in 5..11 -> "Good morning, Joe"
+        in 5..11 -> "Good morning, "
         in 12..16 -> "Good afternoon, Joe"
         else -> "Good evening, Joe"
     }
@@ -817,12 +831,21 @@ private fun JoeTvHeroTv(
 
     val (currentTime, weather, greeting) = rememberHeroState()
 
-    val nextEvent by produceState<JoeTvCalendarEvent?>(
+    val googleCalendarApi = remember(context.applicationContext) {
+        GoogleCalendarApi(context.applicationContext)
+    }
+
+    val isGoogleCalendarConnected =
+        googleCalendarApi.isConnected()
+
+    val nextEvent by produceState<GoogleCalendarEvent?>(
         initialValue = null,
-        key1 = calendarPermissionGranted
+        key1 = isGoogleCalendarConnected
     ) {
-        if (calendarPermissionGranted) {
-            value = loadNextCalendarEvent(context)
+        if (isGoogleCalendarConnected) {
+            value = runCatching {
+                googleCalendarApi.getNextEvent()
+            }.getOrNull()
         }
     }
 
@@ -930,11 +953,11 @@ private fun JoeTvHeroTv(
 
             CalendarHeroCard(
                 event = nextEvent,
-                permissionGranted = calendarPermissionGranted,
+                permissionGranted = isGoogleCalendarConnected,
                 modifier = Modifier
                     .width(175.dp)
                     .height(135.dp),
-                onClick = { }
+                onClick = onRequestCalendarPermission
             )
 
             Spacer(modifier = Modifier.width(14.dp))
@@ -960,7 +983,7 @@ private fun JoeTvHeroTv(
  */
 @Composable
 private fun CalendarHeroCard(
-    event: JoeTvCalendarEvent?,
+    event: GoogleCalendarEvent?,
     permissionGranted: Boolean,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
@@ -1025,6 +1048,21 @@ private fun CalendarHeroCard(
             )
             .onFocusChanged {
                 focused = it.isFocused
+            }
+            .onPreviewKeyEvent { event ->
+                if (
+                    event.type == KeyEventType.KeyDown &&
+                    (
+                            event.key == Key.DirectionCenter ||
+                                    event.key == Key.Enter ||
+                                    event.key == Key.NumPadEnter
+                            )
+                ) {
+                    onClick()
+                    true
+                } else {
+                    false
+                }
             }
             .focusable()
             .clickable {
@@ -1766,14 +1804,23 @@ private fun JoeTvAppCard(
                 if (event.type != KeyEventType.KeyDown) {
                     false
                 } else {
-                    when (event.key) {
-                        Key.Bookmark,
-                        Key.ButtonY -> {
+                    val nativeKeyCode =
+                        event.key.nativeKeyCode
+
+                    when {
+                        nativeKeyCode ==
+                                android.view.KeyEvent.KEYCODE_PAGE_DOWN -> {
                             onToggleFavorite()
                             true
                         }
 
-                        Key.ButtonX -> {
+                        event.key == Key.Bookmark ||
+                                event.key == Key.ButtonY -> {
+                            onToggleFavorite()
+                            true
+                        }
+
+                        event.key == Key.ButtonX -> {
                             onToggleHidden()
                             true
                         }
@@ -1804,7 +1851,6 @@ private fun JoeTvAppCard(
                     contentDescription = "${app.name} icon",
                     modifier = Modifier.size(38.dp),
                     contentScale = ContentScale.Fit
-                )
             } else {
                 Text(
                     text = app.initials,
@@ -1882,7 +1928,7 @@ private fun EmptyFavoritesCard() {
         contentAlignment = Alignment.CenterStart
     ) {
         Text(
-            text = "Highlight an app and press the bookmark button to add it.",
+            text = "Highlight an app and press Page Down to add it.",
             color = Color.White.copy(alpha = 0.55f),
             fontSize = 15.sp
         )

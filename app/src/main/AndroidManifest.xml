@@ -13,61 +13,56 @@
 
     <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
 
-    <!-- Allow JoeTV to discover launchable apps -->
-<queries>
+    <!-- Allow JoeTV to discover Android TV applications -->
+    <queries>
 
-<intent>
-    <action android:name="android.intent.action.MAIN" />
-    <category android:name="android.intent.category.LAUNCHER" />
-</intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+        </intent>
 
-<intent>
-    <action android:name="android.intent.action.MAIN" />
-    <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-</intent>
+        <!-- Allow JoeTV to discover regular Android applications -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
 
-</queries>
+    </queries>
 
-<application
-android:allowBackup="true"
-android:banner="@mipmap/ic_launcher"
-android:icon="@mipmap/ic_launcher"
-android:label="@string/app_name"
-android:resizeableActivity="true"
-android:supportsRtl="true"
-android:theme="@style/Theme.JoeTV">
+    <application
+        android:allowBackup="true"
+        android:label="JoeTV"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.JoeTV">
 
-<activity
-    android:name=".MainActivity"
-    android:exported="true"
-    android:launchMode="singleTask"
-    android:resizeableActivity="true"
-    android:screenOrientation="landscape"
-    android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
 
-    <!-- Phone / Tablet Launcher -->
-    <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.LAUNCHER" />
-    </intent-filter>
+            <!-- Phone / Tablet Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
 
-    <!-- Android TV Launcher -->
-    <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-    </intent-filter>
+            <!-- Android TV Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
 
-    <!-- Home Launcher -->
-    <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.HOME" />
-        <category android:name="android.intent.category.DEFAULT" />
-    </intent-filter>
+            <!-- Home Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
 
-</activity>
+        </activity>
 
-</application>
+    </application>
 
 </manifest>
