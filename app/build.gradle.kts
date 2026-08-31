@@ -27,6 +27,44 @@ val googleClientSecret =
         ""
     )
 
+// Optional: a refresh token obtained once on a desktop machine via
+// tools/get_google_refresh_token.py.
+//
+// The Pi has no browser and no signed-in Google account, so running the
+// interactive OAuth flow on-device is impractical. Baking the refresh token in
+// lets JoeTV mint access tokens on its own, survives a reinstall or a data
+// wipe, and means Calendar just works at first boot.
+val googleRefreshToken =
+    localProperties.getProperty(
+        "JOETV_GOOGLE_REFRESH_TOKEN",
+        ""
+    )
+
+// Service account credentials -- how JoeTV actually reads the calendar.
+//
+// The calendar is *shared with* this service account, so there is no consent
+// screen, no publishing status, and no refresh token to expire. Generate these
+// three values from the downloaded service account JSON with
+// tools/prepare_service_account.py.
+val googleServiceAccountEmail =
+    localProperties.getProperty(
+        "JOETV_GOOGLE_SERVICE_ACCOUNT_EMAIL",
+        ""
+    )
+
+val googleServiceAccountKey =
+    localProperties.getProperty(
+        "JOETV_GOOGLE_SERVICE_ACCOUNT_KEY",
+        ""
+    )
+
+// Normally the calendar owner's Gmail address.
+val googleCalendarId =
+    localProperties.getProperty(
+        "JOETV_GOOGLE_CALENDAR_ID",
+        ""
+    )
+
 android {
     namespace = "com.joeshannon.joetv"
 
@@ -53,6 +91,30 @@ android {
             "String",
             "GOOGLE_CLIENT_SECRET",
             "\"$googleClientSecret\""
+        )
+
+        buildConfigField(
+            "String",
+            "GOOGLE_REFRESH_TOKEN",
+            "\"$googleRefreshToken\""
+        )
+
+        buildConfigField(
+            "String",
+            "GOOGLE_SERVICE_ACCOUNT_EMAIL",
+            "\"$googleServiceAccountEmail\""
+        )
+
+        buildConfigField(
+            "String",
+            "GOOGLE_SERVICE_ACCOUNT_KEY",
+            "\"$googleServiceAccountKey\""
+        )
+
+        buildConfigField(
+            "String",
+            "GOOGLE_CALENDAR_ID",
+            "\"$googleCalendarId\""
         )
     }
 

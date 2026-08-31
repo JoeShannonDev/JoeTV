@@ -10,6 +10,7 @@ package com.joeshannon.joetv.screens
 // • Manage favorites and recently opened apps
 // • Hide and restore applications
 // • Display weather, date, and time
+// • Search installed apps by name
 // • Handle TV remote navigation
 // • Launch Android TV applications
 // -----------------------------------------------------------------------------
@@ -23,12 +24,14 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +42,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -47,6 +51,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -67,7 +73,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -102,6 +110,14 @@ import androidx.core.content.ContextCompat
 import com.joeshannon.joetv.calendar.GoogleCalendarConnectScreen
 import com.joeshannon.joetv.calendar.GoogleCalendarApi
 import com.joeshannon.joetv.calendar.GoogleCalendarEvent
+import com.joeshannon.joetv.ui.theme.JoeBackgroundBase
+import com.joeshannon.joetv.ui.theme.JoeBackgroundBottom
+import com.joeshannon.joetv.ui.theme.JoeBackgroundMid
+import com.joeshannon.joetv.ui.theme.JoeBackgroundTop
+import com.joeshannon.joetv.ui.theme.JoeCyan
+import com.joeshannon.joetv.ui.theme.JoeGlowCyan
+import com.joeshannon.joetv.ui.theme.JoeGlowPurple
+import com.joeshannon.joetv.ui.theme.JoePurple
 
 
 
@@ -117,6 +133,15 @@ data class JoeTvApp(
 
 
 /**
+ * Brush used for the cyan → purple focus border seen across JoeTV's
+ * focusable cards (hero, calendar, app cards, media cards).
+ */
+internal fun joeFocusBrush(): Brush = Brush.linearGradient(
+    colors = listOf(JoeCyan, JoePurple)
+)
+
+
+/**
  * Main entry point for the JoeTV launcher.
  *
  * Initializes app data, user preferences, weather, sounds,
@@ -125,34 +150,29 @@ data class JoeTvApp(
 @Composable
 fun HomeScreen(context: Context) {
 
-    var showGoogleCalendarConnect by remember {
+    // Live search query typed into the search bar below the hero banner.
+    var searchQuery by remember {
+        mutableStateOf("")
+    }
+
+    // True while the full-screen All Apps grid is showing.
+    var showAllApps by remember {
         mutableStateOf(false)
     }
 
-    if (showGoogleCalendarConnect) {
-        GoogleCalendarConnectScreen(
-            onConnected = {
-                showGoogleCalendarConnect = false
-            }
-        )
-        return
+    // Package of the favorite currently "grabbed" for reordering, if any.
+    var movingPackage by remember {
+        mutableStateOf<String?>(null)
     }
 
-    var calendarPermissionGranted by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_CALENDAR
-            ) == PackageManager.PERMISSION_GRANTED
-        )
+    // Pressing Home re-enters the running launcher. MainActivity bumps this
+    // signal so JoeTV drops whatever sub-screen was open and shows the home
+    // screen, which is what the Home key does on every other launcher.
+    LaunchedEffect(JoeTvNavigation.homeResetSignal) {
+        showAllApps = false
+        movingPackage = null
+        searchQuery = ""
     }
-
-    val calendarPermissionLauncher =
-        rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            calendarPermissionGranted = granted
-        }
 
 
     // Create the manager responsible for discovering installed apps.
@@ -196,18 +216,39 @@ fun HomeScreen(context: Context) {
         )
     }
 
-    var favoritePackages by remember {
-        mutableStateOf(
-            preferences.getStringSet(
+    // Favorites are stored as an ORDERED list rather than a set, so the row
+    // shows them in the order the user arranged rather than alphabetically.
+    // The old "favorite_packages" set is still read as a fallback so an
+    // existing install keeps its favorites the first time it runs this build.
+    var favoriteOrder by remember {
+
+        // Split into explicitly typed locals rather than one chained elvis
+        // expression: two ?: operators in a row leave Kotlin unable to infer
+        // the state type, which silently breaks every later use of this list.
+        val storedOrder: List<String>? = preferences
+            .getString("favorite_order", null)
+            ?.split("|")
+            ?.filter { it.isNotBlank() }
+
+        val legacyOrder: List<String> = preferences
+            .getStringSet(
                 "favorite_packages",
                 setOf(
                     "org.smarttube.stable",
                     "com.lagradost.cloudstream3",
                     "org.videolan.vlc"
                 )
-            )?.toSet() ?: emptySet()
+            )
+            ?.sorted()
+            ?: emptyList()
+
+        mutableStateOf<List<String>>(
+            storedOrder ?: legacyOrder
         )
     }
+
+    // Membership lookups still want a set; order lives in favoriteOrder.
+    val favoritePackages = favoriteOrder.toSet()
 
     var recentPackages by remember {
         mutableStateOf(
@@ -249,13 +290,27 @@ fun HomeScreen(context: Context) {
         app.packageName in hiddenPackages
     }
 
-    val favoriteApps = visibleApps.filter { app ->
-        app.packageName in favoritePackages
+    // Ordered to match favoriteOrder, dropping any favorite whose app is no
+    // longer installed or is currently hidden.
+    val favoriteApps = favoriteOrder.mapNotNull { packageName ->
+        visibleApps.find { app -> app.packageName == packageName }
     }
 
     val recentApps = recentPackages.mapNotNull { packageName ->
         visibleApps.find { app -> app.packageName == packageName }
     }
+
+    // Apps matching the current search query. Recomputed on every keystroke;
+    // fine at current app-list sizes, but worth debouncing if the list grows.
+    val searchResults = if (searchQuery.isBlank()) {
+        emptyList()
+    } else {
+        visibleApps.filter { app ->
+            app.name.contains(searchQuery, ignoreCase = true)
+        }
+    }
+
+    val isSearching = searchQuery.isNotBlank()
 
 
     /**
@@ -309,26 +364,50 @@ fun HomeScreen(context: Context) {
 
 
     /**
+     * Persists a new favorites order.
+     *
+     * Both keys are written: "favorite_order" is what JoeTV reads, and the
+     * legacy "favorite_packages" set is kept in sync so nothing else that
+     * reads it goes stale.
+     */
+    fun saveFavoriteOrder(updated: List<String>) {
+        favoriteOrder = updated
+
+        preferences.edit()
+            .putString(
+                "favorite_order",
+                updated.joinToString("|")
+            )
+            .putStringSet(
+                "favorite_packages",
+                updated.toSet()
+            )
+            .apply()
+    }
+
+
+    /**
      * Adds or removes an application from Favorites.
+     *
+     * New favorites are appended to the end of the row; the user promotes them
+     * from there with Page Up.
      */
     fun toggleFavorite(app: JoeTvApp) {
         val wasFavorite = app.packageName in favoritePackages
 
         val updatedFavorites =
             if (wasFavorite) {
-                favoritePackages - app.packageName
+                favoriteOrder - app.packageName
             } else {
-                favoritePackages + app.packageName
+                favoriteOrder + app.packageName
             }
 
-        favoritePackages = updatedFavorites
+        // A card that stops being a favorite cannot stay grabbed.
+        if (wasFavorite && movingPackage == app.packageName) {
+            movingPackage = null
+        }
 
-        preferences.edit()
-            .putStringSet(
-                "favorite_packages",
-                updatedFavorites
-            )
-            .apply()
+        saveFavoriteOrder(updatedFavorites)
 
         favoriteNotice = if (wasFavorite) {
             "${app.name} removed from Favorites"
@@ -337,10 +416,90 @@ fun HomeScreen(context: Context) {
         }
     }
 
+
+    /**
+     * Slides a grabbed favorite one slot left (-1) or right (+1).
+     *
+     * The move is computed against the favorites the user can actually see, so
+     * a favorite whose app is uninstalled or hidden never silently swallows a
+     * keypress. The result is then folded back into the full stored order so
+     * those off-screen entries keep their positions.
+     */
+    fun moveFavorite(app: JoeTvApp, offset: Int) {
+        val visibleOrder = favoriteApps.map { it.packageName }
+
+        val currentIndex = visibleOrder.indexOf(app.packageName)
+        if (currentIndex < 0) return
+
+        val targetIndex = currentIndex + offset
+        if (targetIndex < 0 || targetIndex >= visibleOrder.size) return
+
+        val reorderedVisible = visibleOrder.toMutableList()
+        reorderedVisible.removeAt(currentIndex)
+        reorderedVisible.add(targetIndex, app.packageName)
+
+        val visibleSet = visibleOrder.toSet()
+        val nextVisible = reorderedVisible.iterator()
+
+        saveFavoriteOrder(
+            favoriteOrder.map { packageName ->
+                if (packageName in visibleSet) {
+                    nextVisible.next()
+                } else {
+                    packageName
+                }
+            }
+        )
+    }
+
+
+    /**
+     * Grabs a favorite for reordering, or drops the one already grabbed.
+     */
+    fun toggleMove(app: JoeTvApp) {
+        movingPackage = if (movingPackage == app.packageName) {
+            favoriteNotice = "${app.name} moved"
+            null
+        } else {
+            app.packageName
+        }
+    }
+
+    // The All Apps grid replaces the home screen rather than layering over it,
+    // and is declared here so it reuses the same app list, preferences and
+    // launch helpers instead of building a second copy of all that state.
+    if (showAllApps) {
+        AllAppsScreen(
+            context = context,
+            soundManager = soundManager,
+            apps = visibleApps,
+            hiddenApps = hiddenApps,
+            favoritePackages = favoritePackages,
+            hiddenPackages = hiddenPackages,
+            onOpen = { app ->
+                recordRecent(app)
+                launchApp(
+                    context = context,
+                    packageName = app.packageName
+                )
+            },
+            onToggleFavorite = { app ->
+                toggleFavorite(app)
+            },
+            onToggleHidden = { app ->
+                toggleHidden(app)
+            },
+            onExit = {
+                showAllApps = false
+            }
+        )
+        return
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF05070B))
+            .background(JoeBackgroundBase)
     ) {
         JoeTvMovingBackground()
 
@@ -350,154 +509,154 @@ fun HomeScreen(context: Context) {
         ) {
             item {
                 JoeTvHero(
-                    context = context,
-                    calendarPermissionGranted = calendarPermissionGranted,
-                    onRequestCalendarPermission = {
-                        showGoogleCalendarConnect = true
-                    }
+                    context = context
                 )
             }
 
             item {
-                SectionHeader(
-                    title = "Favorites",
-                    subtitle = "Press Page Down to add or remove apps"
+                JoeTvSearchBar(
+                    query = searchQuery,
+                    onQueryChange = { searchQuery = it }
                 )
             }
 
-            item {
-                if (favoriteApps.isEmpty()) {
-                    EmptyFavoritesCard()
-                } else {
-                    AppRow(
-                        context = context,
-                        soundManager = soundManager,
-                        apps = favoriteApps,
-                        favoritePackages = favoritePackages,
-                        onFocused = { },
-                        onOpen = { app ->
-                            recordRecent(app)
-                            launchApp(
-                                context = context,
-                                packageName = app.packageName
-                            )
-                        },
-                        onToggleFavorite = { app ->
-                            toggleFavorite(app)
-                        },
-                        onToggleHidden = { app ->
-                            toggleHidden(app)
+            if (!isSearching) {
+                item {
+                    JoeTvHomeActions(
+                        appCount = visibleApps.size,
+                        onAllApps = {
+                            showAllApps = true
                         }
                     )
                 }
             }
 
-            item {
-                SectionHeader(
-                    title = "Recently Opened",
-                    subtitle = "Jump back into your latest apps"
-                )
-            }
-
-            item {
-                if (recentApps.isEmpty()) {
-                    EmptyRecentAppsCard()
-                } else {
-                    AppRow(
-                        context = context,
-                        soundManager = soundManager,
-                        apps = recentApps,
-                        favoritePackages = favoritePackages,
-                        onFocused = { },
-                        onOpen = { app ->
-                            recordRecent(app)
-                            launchApp(
-                                context = context,
-                                packageName = app.packageName
-                            )
-                        },
-                        onToggleFavorite = { app ->
-                            toggleFavorite(app)
-                        },
-                        onToggleHidden = { app ->
-                            toggleHidden(app)
-                        }
-                    )
-                }
-            }
-
-            item {
-                SectionHeader(
-                    title = "Your Apps",
-                    subtitle = "OK to open  •  Page Down to favorite  •  X to hide"
-                )
-            }
-
-            item {
-                AppRow(
-                    context = context,
-                    soundManager = soundManager,
-                    apps = visibleApps,
-                    favoritePackages = favoritePackages,
-                    onFocused = { },
-                    onOpen = { app ->
-                        recordRecent(app)
-                        launchApp(
-                            context = context,
-                            packageName = app.packageName
-                        )
-                    },
-                    onToggleFavorite = { app ->
-                        toggleFavorite(app)
-                    },
-                    onToggleHidden = { app ->
-                        toggleHidden(app)
-                    }
-                )
-            }
-
-            if (hiddenApps.isNotEmpty()) {
+            if (isSearching) {
                 item {
                     SectionHeader(
-                        title = "Hidden Apps",
-                        subtitle = "Press X to restore an app"
+                        title = "Search Results",
+                        subtitle = "Showing apps matching \"$searchQuery\""
                     )
                 }
 
                 item {
-                    AppRow(
-                        context = context,
-                        soundManager = soundManager,
-                        apps = hiddenApps,
-                        favoritePackages = favoritePackages,
-                        hiddenPackages = hiddenPackages,
-                        onFocused = { },
-                        onOpen = { app ->
-                            recordRecent(app)
-                            launchApp(
-                                context = context,
-                                packageName = app.packageName
-                            )
-                        },
-                        onToggleFavorite = { app ->
-                            toggleFavorite(app)
-                        },
-                        onToggleHidden = { app ->
-                            toggleHidden(app)
-                        }
+                    if (searchResults.isEmpty()) {
+                        EmptySearchResultsCard(query = searchQuery)
+                    } else {
+                        AppRow(
+                            context = context,
+                            soundManager = soundManager,
+                            apps = searchResults,
+                            favoritePackages = favoritePackages,
+                            onFocused = { },
+                            onOpen = { app ->
+                                recordRecent(app)
+                                launchApp(
+                                    context = context,
+                                    packageName = app.packageName
+                                )
+                            },
+                            onToggleFavorite = { app ->
+                                toggleFavorite(app)
+                            },
+                            onToggleHidden = { app ->
+                                toggleHidden(app)
+                            }
+                        )
+                    }
+                }
+            } else {
+                item {
+                    SectionHeader(
+                        title = "Favorites",
+                        subtitle =
+                            if (movingPackage != null) {
+                                "Moving  •  Left / Right to reposition  •  OK to drop"
+                            } else {
+                                "Page Up to move  •  Page Down to add or remove"
+                            }
                     )
                 }
-            }
 
-            item {
-                SectionHeader(
-                    title = "Continue Watching",
-                    subtitle = "Jump back into your media"
-                )
-            }
+                item {
+                    if (favoriteApps.isEmpty()) {
+                        EmptyFavoritesCard()
+                    } else {
+                        AppRow(
+                            context = context,
+                            soundManager = soundManager,
+                            apps = favoriteApps,
+                            favoritePackages = favoritePackages,
+                            canReorder = true,
+                            movingPackage = movingPackage,
+                            onToggleMove = { app ->
+                                toggleMove(app)
+                            },
+                            onMove = { app, offset ->
+                                moveFavorite(app, offset)
+                            },
+                            onFocused = { },
+                            onOpen = { app ->
+                                recordRecent(app)
+                                launchApp(
+                                    context = context,
+                                    packageName = app.packageName
+                                )
+                            },
+                            onToggleFavorite = { app ->
+                                toggleFavorite(app)
+                            },
+                            onToggleHidden = { app ->
+                                toggleHidden(app)
+                            }
+                        )
+                    }
+                }
 
-            item {
-                ContinueWatchingRow()
+                item {
+                    SectionHeader(
+                        title = "Recently Opened",
+                        subtitle = "Jump back into your latest apps"
+                    )
+                }
+
+                item {
+                    if (recentApps.isEmpty()) {
+                        EmptyRecentAppsCard()
+                    } else {
+                        AppRow(
+                            context = context,
+                            soundManager = soundManager,
+                            apps = recentApps,
+                            favoritePackages = favoritePackages,
+                            onFocused = { },
+                            onOpen = { app ->
+                                recordRecent(app)
+                                launchApp(
+                                    context = context,
+                                    packageName = app.packageName
+                                )
+                            },
+                            onToggleFavorite = { app ->
+                                toggleFavorite(app)
+                            },
+                            onToggleHidden = { app ->
+                                toggleHidden(app)
+                            }
+                        )
+                    }
+                }
+
+                item {
+                    SectionHeader(
+                        title = "Continue Watching",
+                        subtitle = "Jump back into your media"
+                    )
+                }
+
+                item {
+                    ContinueWatchingRow()
+                }
             }
 
             item {
@@ -546,10 +705,144 @@ private fun FavoriteNoticeBanner(
 
 
 /**
+ * Hand-drawn magnifying-glass icon for the search bar. Avoids pulling in an
+ * icon font/library for a single glyph.
+ */
+@Composable
+private fun JoeTvSearchIcon(
+    modifier: Modifier = Modifier,
+    tint: Color = Color.White.copy(alpha = 0.7f)
+) {
+    Canvas(modifier = modifier) {
+        val strokeWidth = 2.2.dp.toPx()
+        val radius = size.minDimension * 0.32f
+        val center = Offset(
+            size.width * 0.42f,
+            size.height * 0.42f
+        )
+
+        drawCircle(
+            color = tint,
+            radius = radius,
+            center = center,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = strokeWidth
+            )
+        )
+
+        val handleStart = Offset(
+            center.x + radius * 0.72f,
+            center.y + radius * 0.72f
+        )
+        val handleEnd = Offset(
+            size.width * 0.86f,
+            size.height * 0.86f
+        )
+
+        drawLine(
+            color = tint,
+            start = handleStart,
+            end = handleEnd,
+            strokeWidth = strokeWidth
+        )
+    }
+}
+
+
+/**
+ * Pill-shaped search bar shown below the hero banner. Focusing it with the
+ * D-pad brings up the on-screen keyboard; typing filters installed apps by
+ * name live via the caller's `searchResults` computation.
+ */
+@Composable
+private fun JoeTvSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit
+) {
+    var focused by remember {
+        mutableStateOf(false)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(
+                start = 48.dp,
+                end = 48.dp,
+                top = 4.dp,
+                bottom = 18.dp
+            )
+            .height(52.dp)
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.06f))
+            .then(
+                if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(50)
+                    )
+                } else {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.10f),
+                        shape = RoundedCornerShape(50)
+                    )
+                }
+            )
+            .onFocusChanged {
+                focused = it.isFocused || it.hasFocus
+            }
+            .focusable()
+            .padding(horizontal = 20.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            JoeTvSearchIcon(
+                modifier = Modifier.size(18.dp)
+            )
+
+            Box {
+                if (query.isEmpty()) {
+                    Text(
+                        text = "Search apps",
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 16.sp
+                    )
+                }
+
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = Color.White,
+                        fontSize = 16.sp
+                    ),
+                    cursorBrush = joeFocusBrush(),
+                    keyboardOptions = KeyboardOptions(
+                        imeAction = ImeAction.Search
+                    ),
+                    interactionSource = remember { MutableInteractionSource() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged {
+                            focused = focused || it.isFocused
+                        }
+                )
+            }
+        }
+    }
+}
+
+
+/**
  * Animated background displayed behind the launcher.
  */
 @Composable
-private fun JoeTvMovingBackground() {
+internal fun JoeTvMovingBackground() {
     val transition = rememberInfiniteTransition(
         label = "JoeTVBackground"
     )
@@ -590,9 +883,9 @@ private fun JoeTvMovingBackground() {
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF121A2A),
-                        Color(0xFF080B12),
-                        Color(0xFF030407)
+                        JoeBackgroundTop,
+                        JoeBackgroundMid,
+                        JoeBackgroundBottom
                     )
                 )
             )
@@ -605,7 +898,7 @@ private fun JoeTvMovingBackground() {
                 )
                 .size(470.dp)
                 .background(
-                    color = Color(0x273B82F6),
+                    color = JoeGlowCyan,
                     shape = CircleShape
                 )
         )
@@ -619,7 +912,7 @@ private fun JoeTvMovingBackground() {
                 )
                 .size(430.dp)
                 .background(
-                    color = Color(0x248B5CF6),
+                    color = JoeGlowPurple,
                     shape = CircleShape
                 )
         )
@@ -757,9 +1050,7 @@ private suspend fun loadWeather(): WeatherInfo? = withContext(Dispatchers.IO) {
  */
 @Composable
 private fun JoeTvHero(
-    context: Context,
-    calendarPermissionGranted: Boolean,
-    onRequestCalendarPermission: () -> Unit
+    context: Context
 ) {
     val configuration = LocalConfiguration.current
 
@@ -774,8 +1065,6 @@ private fun JoeTvHero(
     if (isTvLayout) {
         JoeTvHeroTv(
             context = context,
-            calendarPermissionGranted = calendarPermissionGranted,
-            onRequestCalendarPermission = onRequestCalendarPermission
         )
     } else {
         JoeTvHeroTablet()
@@ -807,7 +1096,7 @@ private fun rememberHeroState(): Triple<LocalDateTime, WeatherInfo?, String> {
     }
 
     val greeting = when (currentTime.hour) {
-        in 5..11 -> "Good morning, "
+        in 5..11 -> "Good morning, Joe"
         in 12..16 -> "Good afternoon, Joe"
         else -> "Good evening, Joe"
     }
@@ -821,9 +1110,7 @@ private fun rememberHeroState(): Triple<LocalDateTime, WeatherInfo?, String> {
  */
 @Composable
 private fun JoeTvHeroTv(
-    context: Context,
-    calendarPermissionGranted: Boolean,
-    onRequestCalendarPermission: () -> Unit
+    context: Context
 ) {
     var focused by remember {
         mutableStateOf(false)
@@ -838,14 +1125,59 @@ private fun JoeTvHeroTv(
     val isGoogleCalendarConnected =
         googleCalendarApi.isConnected()
 
+    // Bumped by clicking the calendar card, and whenever JoeTV returns to the
+    // foreground. Restarting produceState is what forces an immediate fetch.
+    var calendarRefreshKey by remember {
+        mutableStateOf(0)
+    }
+
+    val heroLifecycleOwner = LocalLifecycleOwner.current
+
+    // Coming back from another app is exactly when the calendar is most likely
+    // to be stale, and it costs one request.
+    DisposableEffect(heroLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, lifecycleEvent ->
+            if (lifecycleEvent == Lifecycle.Event.ON_RESUME) {
+                calendarRefreshKey++
+            }
+        }
+
+        heroLifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            heroLifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     val nextEvent by produceState<GoogleCalendarEvent?>(
         initialValue = null,
-        key1 = isGoogleCalendarConnected
+        key1 = isGoogleCalendarConnected,
+        key2 = calendarRefreshKey
     ) {
-        if (isGoogleCalendarConnected) {
-            value = runCatching {
+        if (!isGoogleCalendarConnected) {
+            value = null
+            return@produceState
+        }
+
+        // Polls on the same pattern as the weather card above. Without this the
+        // card only updated when the hero re-entered composition, so scrolling
+        // away and back was the only way to refresh it.
+        //
+        // Five minutes also covers the case of an event simply starting: once
+        // it is in the past the API returns the one after it, and the card
+        // moves on by itself.
+        while (true) {
+            runCatching {
                 googleCalendarApi.getNextEvent()
-            }.getOrNull()
+            }.onSuccess { event ->
+                value = event
+            }.onFailure { error ->
+                // Keep showing the last known event rather than blanking the
+                // card over one failed request -- Wi-Fi drops, tokens hiccup.
+                println("JOETV_CALENDAR_REFRESH_FAILED=${error.message}")
+            }
+
+            delay(5 * 60 * 1_000L)
         }
     }
 
@@ -877,14 +1209,19 @@ private fun JoeTvHeroTv(
                     )
                 )
             )
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) {
-                    Color.White.copy(alpha = 0.70f)
+            .then(
+                if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(26.dp)
+                    )
                 } else {
-                    Color.White.copy(alpha = 0.10f)
-                },
-                shape = RoundedCornerShape(26.dp)
+                    Modifier.border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.10f),
+                        shape = RoundedCornerShape(26.dp)
+                    )
+                }
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -903,11 +1240,11 @@ private fun JoeTvHeroTv(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1.2f)
             ) {
                 Text(
                     text = "JOETV",
-                    color = Color(0xFF8CB8FF),
+                    color = JoeCyan,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 3.sp
@@ -955,9 +1292,12 @@ private fun JoeTvHeroTv(
                 event = nextEvent,
                 permissionGranted = isGoogleCalendarConnected,
                 modifier = Modifier
-                    .width(175.dp)
+                    .weight(1f)
+                    .widthIn(min = 175.dp)
                     .height(135.dp),
-                onClick = onRequestCalendarPermission
+                onClick = {
+                    calendarRefreshKey++
+                }
             )
 
             Spacer(modifier = Modifier.width(14.dp))
@@ -1037,14 +1377,19 @@ private fun CalendarHeroCard(
                     )
                 )
             )
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) {
-                    Color.White.copy(alpha = 0.85f)
+            .then(
+                if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(22.dp)
+                    )
                 } else {
-                    Color.White.copy(alpha = 0.14f)
-                },
-                shape = RoundedCornerShape(22.dp)
+                    Modifier.border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(22.dp)
+                    )
+                }
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -1079,7 +1424,7 @@ private fun CalendarHeroCard(
         ) {
             Text(
                 text = "NEXT UP",
-                color = Color(0xFF8CB8FF),
+                color = JoeCyan,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.6.sp
@@ -1095,7 +1440,8 @@ private fun CalendarHeroCard(
                     color = Color.White,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
-                    maxLines = 1,
+                    lineHeight = 20.sp,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
 
@@ -1169,14 +1515,19 @@ private fun JoeTvHeroTablet() {
                     )
                 )
             )
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) {
-                    Color.White.copy(alpha = 0.70f)
+            .then(
+                if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(30.dp)
+                    )
                 } else {
-                    Color.White.copy(alpha = 0.10f)
-                },
-                shape = RoundedCornerShape(30.dp)
+                    Modifier.border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.10f),
+                        shape = RoundedCornerShape(30.dp)
+                    )
+                }
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -1193,7 +1544,7 @@ private fun JoeTvHeroTablet() {
         ) {
             Text(
                 text = "JOETV",
-                color = Color(0xFF8CB8FF),
+                color = JoeCyan,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 4.sp
@@ -1646,32 +1997,45 @@ private fun HeroPill(
 }
 
 @Composable
-private fun SectionHeader(
+internal fun SectionHeader(
     title: String,
     subtitle: String
 ) {
-    Column(
+    Row(
         modifier = Modifier.padding(
             start = 48.dp,
             end = 48.dp,
             top = 18.dp,
             bottom = 5.dp
-        )
+        ),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = title,
-            color = Color.White,
-            fontSize = 23.sp,
-            fontWeight = FontWeight.Bold
+        Box(
+            modifier = Modifier
+                .width(4.dp)
+                .height(22.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(joeFocusBrush())
         )
 
-        Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.width(10.dp))
 
-        Text(
-            text = subtitle,
-            color = Color.White.copy(alpha = 0.46f),
-            fontSize = 14.sp
-        )
+        Column {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 23.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            Text(
+                text = subtitle,
+                color = Color.White.copy(alpha = 0.46f),
+                fontSize = 14.sp
+            )
+        }
     }
 }
 
@@ -1680,12 +2044,16 @@ private fun SectionHeader(
  * Displays a horizontally scrolling row of application cards.
  */
 @Composable
-private fun AppRow(
+internal fun AppRow(
     context: Context,
     soundManager: JoeTvSoundManager,
     apps: List<JoeTvApp>,
     favoritePackages: Set<String>,
     hiddenPackages: Set<String> = emptySet(),
+    canReorder: Boolean = false,
+    movingPackage: String? = null,
+    onToggleMove: (JoeTvApp) -> Unit = { },
+    onMove: (JoeTvApp, Int) -> Unit = { _, _ -> },
     onFocused: (JoeTvApp) -> Unit,
     onOpen: (JoeTvApp) -> Unit,
     onToggleFavorite: (JoeTvApp) -> Unit,
@@ -1710,6 +2078,14 @@ private fun AppRow(
                 app = app,
                 isFavorite = app.packageName in favoritePackages,
                 isHidden = app.packageName in hiddenPackages,
+                canReorder = canReorder,
+                isMoving = movingPackage == app.packageName,
+                onToggleMove = {
+                    onToggleMove(app)
+                },
+                onMove = { offset ->
+                    onMove(app, offset)
+                },
                 onFocused = {
                     onFocused(app)
                 },
@@ -1733,12 +2109,17 @@ private fun AppRow(
  * launching, favorites, and hide shortcuts.
  */
 @Composable
-private fun JoeTvAppCard(
+internal fun JoeTvAppCard(
     context: Context,
     soundManager: JoeTvSoundManager,
     app: JoeTvApp,
     isFavorite: Boolean,
     isHidden: Boolean,
+    fillWidth: Boolean = false,
+    canReorder: Boolean = false,
+    isMoving: Boolean = false,
+    onToggleMove: () -> Unit = { },
+    onMove: (Int) -> Unit = { },
     onFocused: () -> Unit,
     onOpen: () -> Unit,
     onToggleFavorite: () -> Unit,
@@ -1762,31 +2143,55 @@ private fun JoeTvAppCard(
 
     Box(
         modifier = Modifier
-            .size(
-                width = 215.dp,
-                height = 124.dp
+            .then(
+                if (fillWidth) {
+                    Modifier
+                        .fillMaxWidth()
+                        .height(124.dp)
+                } else {
+                    Modifier.size(
+                        width = 215.dp,
+                        height = 124.dp
+                    )
+                }
             )
             .graphicsLayer {
-                val scale = if (focused) 1.07f else 1f
+                // A grabbed card lifts further off the row than a merely
+                // focused one, so it is obvious the card itself is moving.
+                val scale = when {
+                    isMoving -> 1.12f
+                    focused -> 1.07f
+                    else -> 1f
+                }
                 scaleX = scale
                 scaleY = scale
             }
             .clip(RoundedCornerShape(19.dp))
             .background(
-                if (focused) {
-                    Color(0xFF36425E)
-                } else {
-                    Color(0xE0191D27)
+                when {
+                    isMoving -> Color(0xFF16394A)
+                    focused -> Color(0xFF36425E)
+                    else -> Color(0xE0191D27)
                 }
             )
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) {
-                    Color.White
+            .then(
+                if (isMoving) {
+                    Modifier.border(
+                        border = BorderStroke(3.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(19.dp)
+                    )
+                } else if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(19.dp)
+                    )
                 } else {
-                    Color.White.copy(alpha = 0.08f)
-                },
-                shape = RoundedCornerShape(19.dp)
+                    Modifier.border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.08f),
+                        shape = RoundedCornerShape(19.dp)
+                    )
+                }
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -1797,9 +2202,12 @@ private fun JoeTvAppCard(
                 }
             }
             // JoeTV controller shortcuts:
-            // Bookmark / Y = Favorite
-            // X = Hide or Restore
-            // DPAD and OK continue through normal TV navigation. DPAD and OK continue through normal TV focus handling.
+            // Page Up      = Grab / drop a favorite for reordering
+            // Left / Right = Move a grabbed card along the row
+            // Page Down    = Favorite / unfavorite
+            // Bookmark / Y = Favorite / unfavorite
+            // X            = Hide or restore
+            // DPAD and OK otherwise continue through normal TV focus handling.
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) {
                     false
@@ -1808,6 +2216,60 @@ private fun JoeTvAppCard(
                         event.key.nativeKeyCode
 
                     when {
+                        // Page Up picks a favorite up and puts it back down.
+                        // One button does both, so there is no mode to learn
+                        // and no menu to open.
+                        canReorder &&
+                                nativeKeyCode ==
+                                android.view.KeyEvent.KEYCODE_PAGE_UP -> {
+                            onToggleMove()
+                            true
+                        }
+
+                        // While a card is grabbed, Left/Right drag the card
+                        // itself instead of moving focus off it.
+                        isMoving &&
+                                nativeKeyCode ==
+                                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                            onMove(-1)
+                            true
+                        }
+
+                        isMoving &&
+                                nativeKeyCode ==
+                                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            onMove(1)
+                            true
+                        }
+
+                        // OK drops the card rather than launching the app, so
+                        // a card being moved can never be opened by accident.
+                        isMoving && (
+                                nativeKeyCode ==
+                                        android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                                        nativeKeyCode ==
+                                        android.view.KeyEvent.KEYCODE_ENTER
+                                ) -> {
+                            onToggleMove()
+                            true
+                        }
+
+                        // Back also drops the card, since that is the other
+                        // reflex for "get me out of this mode".
+                        isMoving &&
+                                nativeKeyCode ==
+                                android.view.KeyEvent.KEYCODE_BACK -> {
+                            onToggleMove()
+                            true
+                        }
+
+                        // Every other key is swallowed while a card is
+                        // grabbed. Up/Down would carry focus out of the row
+                        // and strand the card mid-move, and favoriting or
+                        // hiding it would yank it out from under the user.
+                        // Grab mode ends deliberately: OK, Page Up, or Back.
+                        isMoving -> true
+
                         nativeKeyCode ==
                                 android.view.KeyEvent.KEYCODE_PAGE_DOWN -> {
                             onToggleFavorite()
@@ -1851,6 +2313,7 @@ private fun JoeTvAppCard(
                     contentDescription = "${app.name} icon",
                     modifier = Modifier.size(38.dp),
                     contentScale = ContentScale.Fit
+                )
             } else {
                 Text(
                     text = app.initials,
@@ -1861,7 +2324,15 @@ private fun JoeTvAppCard(
             }
         }
 
-        if (isFavorite) {
+        if (isMoving) {
+            Text(
+                text = "◀  ▶",
+                modifier = Modifier.align(Alignment.TopEnd),
+                color = JoeCyan,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        } else if (isFavorite) {
             Text(
                 text = "★",
                 modifier = Modifier.align(Alignment.TopEnd),
@@ -1895,8 +2366,18 @@ private fun JoeTvAppCard(
             )
 
             Text(
-                text = app.description,
-                color = Color.White.copy(alpha = 0.50f),
+                text =
+                    if (isMoving) {
+                        "Left / Right to move  •  OK to drop"
+                    } else {
+                        app.description
+                    },
+                color =
+                    if (isMoving) {
+                        JoeCyan.copy(alpha = 0.95f)
+                    } else {
+                        Color.White.copy(alpha = 0.50f)
+                    },
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -1965,6 +2446,36 @@ private fun EmptyRecentAppsCard() {
     }
 }
 
+@Composable
+private fun EmptySearchResultsCard(query: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(
+                start = 48.dp,
+                end = 48.dp,
+                top = 10.dp,
+                bottom = 28.dp
+            )
+            .height(96.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.White.copy(alpha = 0.04f))
+            .border(
+                width = 1.dp,
+                color = Color.White.copy(alpha = 0.07f),
+                shape = RoundedCornerShape(18.dp)
+            )
+            .padding(20.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Text(
+            text = "No apps match \"$query\".",
+            color = Color.White.copy(alpha = 0.55f),
+            fontSize = 15.sp
+        )
+    }
+}
+
 
 /**
  * Placeholder media section for future streaming integrations.
@@ -2019,14 +2530,19 @@ private fun MediaCard(title: String) {
                     )
                 )
             )
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) {
-                    Color.White
+            .then(
+                if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(19.dp)
+                    )
                 } else {
-                    Color.White.copy(alpha = 0.07f)
-                },
-                shape = RoundedCornerShape(19.dp)
+                    Modifier.border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.07f),
+                        shape = RoundedCornerShape(19.dp)
+                    )
+                }
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -2090,8 +2606,9 @@ private fun JoeTvFooter() {
 
         Text(
             text = "Version 2.0",
-            color = Color.White.copy(alpha = 0.42f),
-            fontSize = 13.sp
+            color = JoePurple,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold
         )
     }
 }
@@ -2167,6 +2684,181 @@ private fun openSoundAssistant(context: Context) {
             }
 
             context.startActivity(browserIntent)
+        }
+    }
+}
+
+/**
+ * Row of home-screen actions sitting under the search bar.
+ *
+ * The full app list used to be rendered inline on the home screen, which made
+ * the page long and pushed everything else below the fold. It now lives behind
+ * this button instead.
+ */
+@Composable
+private fun JoeTvHomeActions(
+    appCount: Int,
+    onAllApps: () -> Unit
+) {
+    Row(
+        modifier = Modifier.padding(
+            start = 48.dp,
+            end = 48.dp,
+            top = 2.dp,
+            bottom = 2.dp
+        ),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        JoeTvPillButton(
+            label = "All Apps",
+            badge = appCount.toString(),
+            showGridIcon = true,
+            onClick = onAllApps
+        )
+    }
+}
+
+
+/**
+ * Focusable pill button used for JoeTV's screen-level actions.
+ *
+ * Shares the launcher's cyan → purple focus treatment so it reads as part of
+ * the same surface as the app cards.
+ */
+@Composable
+internal fun JoeTvPillButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    badge: String? = null,
+    showGridIcon: Boolean = false,
+    onClick: () -> Unit
+) {
+    var focused by remember {
+        mutableStateOf(false)
+    }
+
+    Box(
+        modifier = modifier
+            .height(46.dp)
+            .clip(RoundedCornerShape(23.dp))
+            .background(
+                if (focused) {
+                    joeFocusBrush()
+                } else {
+                    Brush.linearGradient(
+                        listOf(
+                            Color(0xE0191D27),
+                            Color(0xE0191D27)
+                        )
+                    )
+                }
+            )
+            .border(
+                border = BorderStroke(
+                    width = if (focused) 2.dp else 1.dp,
+                    brush =
+                        if (focused) {
+                            joeFocusBrush()
+                        } else {
+                            Brush.linearGradient(
+                                listOf(
+                                    Color.White.copy(alpha = 0.14f),
+                                    Color.White.copy(alpha = 0.14f)
+                                )
+                            )
+                        }
+                ),
+                shape = RoundedCornerShape(23.dp)
+            )
+            .onFocusChanged {
+                focused = it.isFocused
+            }
+            .focusable()
+            .clickable {
+                onClick()
+            }
+            .padding(horizontal = 22.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (showGridIcon) {
+                JoeTvGridIcon(
+                    tint =
+                        if (focused) {
+                            Color(0xFF06121A)
+                        } else {
+                            Color.White.copy(alpha = 0.85f)
+                        }
+                )
+
+                Spacer(modifier = Modifier.width(10.dp))
+            }
+
+            Text(
+                text = label,
+                color =
+                    if (focused) {
+                        Color(0xFF06121A)
+                    } else {
+                        Color.White.copy(alpha = 0.92f)
+                    },
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            if (badge != null) {
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Text(
+                    text = badge,
+                    color =
+                        if (focused) {
+                            Color(0xFF06121A).copy(alpha = 0.65f)
+                        } else {
+                            Color.White.copy(alpha = 0.42f)
+                        },
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+
+/**
+ * Small 2x2 grid glyph drawn with Canvas.
+ *
+ * Hand-drawn for the same reason as the search icon: it avoids pulling an
+ * icon font or extended-icons dependency into the launcher for one shape.
+ */
+@Composable
+private fun JoeTvGridIcon(
+    tint: Color
+) {
+    Canvas(
+        modifier = Modifier.size(15.dp)
+    ) {
+        val cell = size.width * 0.40f
+        val gap = size.width - (cell * 2f)
+
+        listOf(
+            Offset(0f, 0f),
+            Offset(cell + gap, 0f),
+            Offset(0f, cell + gap),
+            Offset(cell + gap, cell + gap)
+        ).forEach { corner ->
+            drawRoundRect(
+                color = tint,
+                topLeft = corner,
+                size = Size(cell, cell),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                    cell * 0.28f,
+                    cell * 0.28f
+                )
+            )
         }
     }
 }

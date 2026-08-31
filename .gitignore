@@ -24,3 +24,5 @@ Thumbs.db
 
 # Generated files
 *.iml
+# Pre-edit snapshots kept by Claude while refactoring
+.joetv_backup/

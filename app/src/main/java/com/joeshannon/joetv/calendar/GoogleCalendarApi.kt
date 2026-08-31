@@ -25,30 +25,43 @@ class GoogleCalendarApi(
     private val appContext =
         context.applicationContext
 
-    private val tokenStore =
-        GoogleCalendarTokenStore(
-            appContext
-        )
-
-    private val auth =
-        GoogleCalendarAuth(
-            context = appContext,
-            clientId = BuildConfig.GOOGLE_CLIENT_ID,
-            clientSecret = BuildConfig.GOOGLE_CLIENT_SECRET
-        )
-
     private val httpClient =
         OkHttpClient()
 
+    // JoeTV authenticates as a service account that the target calendar has
+    // been shared with, rather than as a signed-in user. See
+    // GoogleServiceAccountAuth for why the user-facing OAuth flows do not fit
+    // a device with no browser and no keyboard.
+    private val auth =
+        GoogleServiceAccountAuth(
+            clientEmail = BuildConfig.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            privateKeyBase64 = BuildConfig.GOOGLE_SERVICE_ACCOUNT_KEY,
+            httpClient = httpClient
+        )
+
+    // Which calendar to read. Normally the owner's Gmail address, which is the
+    // ID of their primary calendar. "primary" would resolve to the service
+    // account's own empty calendar, so it is deliberately not the default.
+    private val calendarId =
+        BuildConfig.GOOGLE_CALENDAR_ID
+
     suspend fun getNextEvent(): GoogleCalendarEvent? =
         withContext(Dispatchers.IO) {
+
+            if (!isConnected()) {
+                return@withContext null
+            }
 
             val accessToken =
                 getValidAccessToken()
                     ?: return@withContext null
 
             val url =
-                "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+                (
+                    "https://www.googleapis.com/calendar/v3/calendars/" +
+                            java.net.URLEncoder.encode(calendarId, "UTF-8") +
+                            "/events"
+                    )
                     .toHttpUrl()
                     .newBuilder()
                     .addQueryParameter(
@@ -168,28 +181,27 @@ class GoogleCalendarApi(
                 }
         }
 
+    /**
+     * True when this build has everything it needs to read a calendar.
+     *
+     * There is no per-user connection step any more, so this is purely a
+     * question of whether the build was configured.
+     */
     fun isConnected(): Boolean =
-        tokenStore.isConnected()
+        auth.isConfigured() &&
+                calendarId.isNotBlank()
 
-    private suspend fun getValidAccessToken(): String? {
-
-        if (tokenStore.isAccessTokenUsable()) {
-            return tokenStore.accessToken()
-        }
-
-        val refreshToken =
-            tokenStore.refreshToken()
-                ?: return null
-
-        val refreshedTokens =
-            auth.refreshAccessToken(
-                refreshToken
-            )
-
-        tokenStore.save(
-            refreshedTokens
-        )
-
-        return refreshedTokens.accessToken
-    }
+    /**
+     * Returns an access token, or null if the service account cannot get one.
+     *
+     * Failures are swallowed to null rather than thrown: a calendar that
+     * cannot be read should leave the hero card empty, never crash the
+     * launcher. The cause is printed for logcat.
+     */
+    private suspend fun getValidAccessToken(): String? =
+        runCatching {
+            auth.accessToken()
+        }.onFailure { error ->
+            println("JOETV_CALENDAR_AUTH_FAILED=${error.message}")
+        }.getOrNull()
 }

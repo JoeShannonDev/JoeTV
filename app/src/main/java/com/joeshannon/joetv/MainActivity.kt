@@ -1,5 +1,6 @@
 package com.joeshannon.joetv
 
+import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Handler
@@ -11,6 +12,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.joeshannon.joetv.screens.HomeScreen
+import com.joeshannon.joetv.screens.JoeTvNavigation
 import com.joeshannon.joetv.ui.theme.JoeTVTheme
 
 class MainActivity : ComponentActivity() {
@@ -47,6 +49,24 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * Called when the Home key (or any other launcher intent) re-enters an
+     * already-running JoeTV.
+     *
+     * JoeTV keeps its sub-screens (All Apps, the Google Calendar connect flow)
+     * as Compose state, and Android reuses this Activity instance rather than
+     * recreating it. Without this, pressing Home while on a sub-screen would
+     * appear to do nothing. Resetting here makes Home behave the way it does on
+     * every other launcher: it always lands you back on the home screen.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+
+        setIntent(intent)
+
+        JoeTvNavigation.requestHomeReset()
     }
 
     override fun onResume() {
