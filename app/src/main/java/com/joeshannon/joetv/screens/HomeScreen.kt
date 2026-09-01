@@ -102,7 +102,6 @@ import androidx.compose.ui.input.key.type
 import android.content.ActivityNotFoundException
 import android.net.Uri
 import android.provider.Settings
-import android.speech.RecognizerIntent
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -111,6 +110,7 @@ import androidx.core.content.ContextCompat
 import com.joeshannon.joetv.calendar.GoogleCalendarConnectScreen
 import com.joeshannon.joetv.calendar.GoogleCalendarApi
 import com.joeshannon.joetv.calendar.GoogleCalendarEvent
+import com.joeshannon.joetv.services.VoiceRecognizer
 import com.joeshannon.joetv.ui.theme.JoeBackgroundBase
 import com.joeshannon.joetv.ui.theme.JoeBackgroundBottom
 import com.joeshannon.joetv.ui.theme.JoeBackgroundMid
@@ -161,6 +161,11 @@ fun HomeScreen(context: Context) {
         mutableStateOf(false)
     }
 
+    // True while the full-screen theme picker is showing.
+    var showSettings by remember {
+        mutableStateOf(false)
+    }
+
     // Package of the favorite currently "grabbed" for reordering, if any.
     var movingPackage by remember {
         mutableStateOf<String?>(null)
@@ -171,8 +176,16 @@ fun HomeScreen(context: Context) {
     // screen, which is what the Home key does on every other launcher.
     LaunchedEffect(JoeTvNavigation.homeResetSignal) {
         showAllApps = false
+        showSettings = false
         movingPackage = null
         searchQuery = ""
+    }
+
+    // Restores whichever theme was picked last time, once per HomeScreen
+    // launch. applyJoeTvTheme() defaults to Neon Cyan, so a fresh install
+    // with nothing saved yet is unaffected.
+    LaunchedEffect(Unit) {
+        restoreSavedTheme(context)
     }
 
     // True while the speech recognizer is actively listening. Drives the
@@ -357,23 +370,42 @@ fun HomeScreen(context: Context) {
     // Voice search
     //
     // Tapping the mic (or pressing the remote's search/assist button, see
-    // MainActivity.onKeyDown) starts Android's built-in speech recognizer.
+    // MainActivity.onKeyDown) starts JoeTV's bundled Vosk offline recognizer.
+    //
+    // This does NOT use android.speech.RecognizerIntent: LineageOS TV without
+    // GApps has no system speech recognizer installed at all (no Google app,
+    // no "Speech Services by Google"), so that intent has nothing to resolve
+    // to on this device and used to fail with "No voice recognizer found on
+    // this device". Vosk is bundled directly into JoeTV instead, so voice
+    // search works fully offline with zero Google dependency.
+    //
     // A spoken phrase that closely matches an installed app's name launches
     // that app directly; anything else is treated as a normal typed search,
     // reusing the existing "Search Results" section below.
     // ---------------------------------------------------------------------
 
-    val speechRecognizerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        isListening = false
+    val voiceRecognizer = remember(context.applicationContext) {
+        VoiceRecognizer(context.applicationContext)
+    }
 
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val spokenText = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
+    // Unpacking the bundled model takes a moment on first launch after an
+    // install, so it starts as soon as the home screen appears rather than
+    // waiting for the first mic tap.
+    DisposableEffect(voiceRecognizer) {
+        voiceRecognizer.prepare()
 
-            if (!spokenText.isNullOrBlank()) {
+        onDispose {
+            voiceRecognizer.release()
+        }
+    }
+
+    fun beginListening() {
+        isListening = true
+
+        voiceRecognizer.startListening(
+            onResult = { spokenText ->
+                isListening = false
+
                 handleVoiceQuery(
                     spokenText = spokenText,
                     apps = visibleApps,
@@ -388,34 +420,19 @@ fun HomeScreen(context: Context) {
                         searchQuery = text
                     }
                 )
+            },
+            onError = { message ->
+                isListening = false
+                voiceStatusMessage = message
             }
-        }
-    }
-
-    fun launchVoiceRecognizer() {
-        val recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Say an app name, like \"Netflix\"")
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-        }
-
-        if (recognizerIntent.resolveActivity(context.packageManager) != null) {
-            isListening = true
-            speechRecognizerLauncher.launch(recognizerIntent)
-        } else {
-            voiceStatusMessage = "No voice recognizer found on this device"
-        }
+        )
     }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            launchVoiceRecognizer()
+            beginListening()
         } else {
             voiceStatusMessage = "Microphone permission is needed for voice search"
         }
@@ -428,7 +445,7 @@ fun HomeScreen(context: Context) {
         ) == PackageManager.PERMISSION_GRANTED
 
         if (hasMicPermission) {
-            launchVoiceRecognizer()
+            beginListening()
         } else {
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
@@ -607,6 +624,16 @@ fun HomeScreen(context: Context) {
         return
     }
 
+    if (showSettings) {
+        SettingsScreen(
+            context = context,
+            onExit = {
+                showSettings = false
+            }
+        )
+        return
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -639,6 +666,9 @@ fun HomeScreen(context: Context) {
                         appCount = visibleApps.size,
                         onAllApps = {
                             showAllApps = true
+                        },
+                        onSettings = {
+                            showSettings = true
                         }
                     )
                 }
@@ -3159,7 +3189,8 @@ private fun openSoundAssistant(context: Context) {
 @Composable
 private fun JoeTvHomeActions(
     appCount: Int,
-    onAllApps: () -> Unit
+    onAllApps: () -> Unit,
+    onSettings: () -> Unit
 ) {
     Row(
         modifier = Modifier.padding(
@@ -3175,6 +3206,13 @@ private fun JoeTvHomeActions(
             badge = appCount.toString(),
             showGridIcon = true,
             onClick = onAllApps
+        )
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        JoeTvPillButton(
+            label = "Themes",
+            onClick = onSettings
         )
     }
 }

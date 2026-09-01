@@ -1,0 +1,683 @@
+From 50d98d36263cf38cd143b5897eab2adbdd937396 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 1 Sep 2026 21:27:38 +0000
+Subject: [PATCH] Add voice search: mic button, remote hotkey, and fuzzy
+ app-name matching
+
+Adds a mic button to the home screen search bar that starts Android's
+built-in speech recognizer (RecognizerIntent). A spoken phrase that
+closely matches an installed app's name (Levenshtein-based fuzzy
+match) launches that app directly; anything else falls back to a
+normal typed search using the existing Search Results section.
+
+- JoeTvNavigation gains a voiceSearchSignal so MainActivity can trigger
+  voice search from the remote's search/assist/voice-assist button,
+  the same way homeResetSignal handles the Home key.
+- HomeScreen requests RECORD_AUDIO at runtime, launches the
+  recognizer, and shows a full-screen "Listening..." overlay with a
+  pulsing mic while it's active.
+- AndroidManifest.xml: RECORD_AUDIO permission + a <queries> entry so
+  JoeTV can resolve the system speech recognizer on Android 11+.
+
+Not yet build-verified on device -- this container has no Android SDK
+and can't reach dl.google.com to fetch one, so verification here was
+limited to a brace/paren balance check and confirming every new
+symbol (RecognizerIntent, ActivityResultContracts, ContextCompat,
+etc.) is already imported and used elsewhere in these files. Needs a
+real ./gradlew installDebug and an on-device test next.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JGTX9PKqh5xGrHBmeadTwL
+---
+ app/src/main/AndroidManifest.xml              |   6 +
+ .../java/com/joeshannon/joetv/MainActivity.kt |  22 +
+ .../joeshannon/joetv/screens/HomeScreen.kt    | 473 +++++++++++++++++-
+ .../joetv/screens/JoeTvNavigation.kt          |  17 +
+ 4 files changed, 512 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 9d5a96b..b7d5e35 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -15,6 +15,7 @@
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.READ_CALENDAR" />
++    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+ 
+     <!-- Allow JoeTV to discover Android TV applications -->
+     <queries>
+@@ -30,6 +31,11 @@
+             <category android:name="android.intent.category.LAUNCHER" />
+         </intent>
+ 
++        <!-- Allow JoeTV to find the device's speech recognizer for voice search -->
++        <intent>
++            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
++        </intent>
++
+     </queries>
+ 
+     <application
+diff --git a/app/src/main/java/com/joeshannon/joetv/MainActivity.kt b/app/src/main/java/com/joeshannon/joetv/MainActivity.kt
+index 8f2e02e..12614f5 100644
+--- a/app/src/main/java/com/joeshannon/joetv/MainActivity.kt
++++ b/app/src/main/java/com/joeshannon/joetv/MainActivity.kt
+@@ -5,6 +5,7 @@ import android.content.res.Configuration
+ import android.os.Bundle
+ import android.os.Handler
+ import android.os.Looper
++import android.view.KeyEvent
+ import androidx.activity.ComponentActivity
+ import androidx.activity.compose.BackHandler
+ import androidx.activity.compose.setContent
+@@ -69,6 +70,27 @@ class MainActivity : ComponentActivity() {
+         JoeTvNavigation.requestHomeReset()
+     }
+ 
++    /**
++     * Lets a TV remote's dedicated mic/search/assist button start JoeTV's
++     * voice search, the same way tapping the on-screen mic button does.
++     *
++     * Different remotes map their mic button to different key codes, so all
++     * three are handled here rather than guessing which one Joe's remote
++     * sends.
++     */
++    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
++        return when (keyCode) {
++            KeyEvent.KEYCODE_SEARCH,
++            KeyEvent.KEYCODE_ASSIST,
++            KeyEvent.KEYCODE_VOICE_ASSIST -> {
++                JoeTvNavigation.requestVoiceSearch()
++                true
++            }
++
++            else -> super.onKeyDown(keyCode, event)
++        }
++    }
++
+     override fun onResume() {
+         super.onResume()
+ 
+diff --git a/app/src/main/java/com/joeshannon/joetv/screens/HomeScreen.kt b/app/src/main/java/com/joeshannon/joetv/screens/HomeScreen.kt
+index aea3106..5187617 100644
+--- a/app/src/main/java/com/joeshannon/joetv/screens/HomeScreen.kt
++++ b/app/src/main/java/com/joeshannon/joetv/screens/HomeScreen.kt
+@@ -102,6 +102,7 @@ import androidx.compose.ui.input.key.type
+ import android.content.ActivityNotFoundException
+ import android.net.Uri
+ import android.provider.Settings
++import android.speech.RecognizerIntent
+ import android.Manifest
+ import android.content.pm.PackageManager
+ import androidx.activity.compose.rememberLauncherForActivityResult
+@@ -174,6 +175,25 @@ fun HomeScreen(context: Context) {
+         searchQuery = ""
+     }
+ 
++    // True while the speech recognizer is actively listening. Drives the
++    // full-screen "Listening..." overlay and the mic button's pulse.
++    var isListening by remember {
++        mutableStateOf(false)
++    }
++
++    // Short-lived message shown when voice search can't proceed (no
++    // recognizer on the device, mic permission denied, etc.).
++    var voiceStatusMessage by remember {
++        mutableStateOf<String?>(null)
++    }
++
++    LaunchedEffect(voiceStatusMessage) {
++        if (voiceStatusMessage != null) {
++            delay(2_600)
++            voiceStatusMessage = null
++        }
++    }
++
+ 
+     // Create the manager responsible for discovering installed apps.
+     val appManager = remember(context.applicationContext) {
+@@ -333,6 +353,97 @@ fun HomeScreen(context: Context) {
+     }
+ 
+ 
++    // ---------------------------------------------------------------------
++    // Voice search
++    //
++    // Tapping the mic (or pressing the remote's search/assist button, see
++    // MainActivity.onKeyDown) starts Android's built-in speech recognizer.
++    // A spoken phrase that closely matches an installed app's name launches
++    // that app directly; anything else is treated as a normal typed search,
++    // reusing the existing "Search Results" section below.
++    // ---------------------------------------------------------------------
++
++    val speechRecognizerLauncher = rememberLauncherForActivityResult(
++        contract = ActivityResultContracts.StartActivityForResult()
++    ) { result ->
++        isListening = false
++
++        if (result.resultCode == android.app.Activity.RESULT_OK) {
++            val spokenText = result.data
++                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
++                ?.firstOrNull()
++
++            if (!spokenText.isNullOrBlank()) {
++                handleVoiceQuery(
++                    spokenText = spokenText,
++                    apps = visibleApps,
++                    onLaunch = { app ->
++                        recordRecent(app)
++                        launchApp(
++                            context = context,
++                            packageName = app.packageName
++                        )
++                    },
++                    onSearch = { text ->
++                        searchQuery = text
++                    }
++                )
++            }
++        }
++    }
++
++    fun launchVoiceRecognizer() {
++        val recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
++            putExtra(
++                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
++                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
++            )
++            putExtra(RecognizerIntent.EXTRA_PROMPT, "Say an app name, like \"Netflix\"")
++            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
++            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
++        }
++
++        if (recognizerIntent.resolveActivity(context.packageManager) != null) {
++            isListening = true
++            speechRecognizerLauncher.launch(recognizerIntent)
++        } else {
++            voiceStatusMessage = "No voice recognizer found on this device"
++        }
++    }
++
++    val micPermissionLauncher = rememberLauncherForActivityResult(
++        contract = ActivityResultContracts.RequestPermission()
++    ) { granted ->
++        if (granted) {
++            launchVoiceRecognizer()
++        } else {
++            voiceStatusMessage = "Microphone permission is needed for voice search"
++        }
++    }
++
++    fun startVoiceSearch() {
++        val hasMicPermission = ContextCompat.checkSelfPermission(
++            context,
++            Manifest.permission.RECORD_AUDIO
++        ) == PackageManager.PERMISSION_GRANTED
++
++        if (hasMicPermission) {
++            launchVoiceRecognizer()
++        } else {
++            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
++        }
++    }
++
++    // Lets the remote's dedicated search/mic/assist button (see
++    // MainActivity.onKeyDown) start listening from anywhere in JoeTV, the
++    // same way tapping the on-screen mic button does.
++    LaunchedEffect(JoeTvNavigation.voiceSearchSignal) {
++        if (JoeTvNavigation.voiceSearchSignal > 0) {
++            startVoiceSearch()
++        }
++    }
++
++
+     /**
+      * Hides or restores an application from the home screen.
+      */
+@@ -516,7 +627,9 @@ fun HomeScreen(context: Context) {
+             item {
+                 JoeTvSearchBar(
+                     query = searchQuery,
+-                    onQueryChange = { searchQuery = it }
++                    onQueryChange = { searchQuery = it },
++                    isListening = isListening,
++                    onVoiceSearch = { startVoiceSearch() }
+                 )
+             }
+ 
+@@ -672,6 +785,19 @@ fun HomeScreen(context: Context) {
+                     .padding(bottom = 34.dp)
+             )
+         }
++
++        voiceStatusMessage?.let { message ->
++            FavoriteNoticeBanner(
++                message = message,
++                modifier = Modifier
++                    .align(Alignment.BottomCenter)
++                    .padding(bottom = 34.dp)
++            )
++        }
++
++        if (isListening) {
++            JoeTvVoiceListeningOverlay()
++        }
+     }
+ }
+ 
+@@ -757,7 +883,9 @@ private fun JoeTvSearchIcon(
+ @Composable
+ private fun JoeTvSearchBar(
+     query: String,
+-    onQueryChange: (String) -> Unit
++    onQueryChange: (String) -> Unit,
++    isListening: Boolean = false,
++    onVoiceSearch: () -> Unit = {}
+ ) {
+     var focused by remember {
+         mutableStateOf(false)
+@@ -793,10 +921,14 @@ private fun JoeTvSearchBar(
+                 focused = it.isFocused || it.hasFocus
+             }
+             .focusable()
+-            .padding(horizontal = 20.dp),
++            .padding(
++                start = 20.dp,
++                end = 8.dp
++            ),
+         contentAlignment = Alignment.CenterStart
+     ) {
+         Row(
++            modifier = Modifier.fillMaxSize(),
+             verticalAlignment = Alignment.CenterVertically,
+             horizontalArrangement = Arrangement.spacedBy(12.dp)
+         ) {
+@@ -804,12 +936,16 @@ private fun JoeTvSearchBar(
+                 modifier = Modifier.size(18.dp)
+             )
+ 
+-            Box {
++            Box(
++                modifier = Modifier.weight(1f)
++            ) {
+                 if (query.isEmpty()) {
+                     Text(
+-                        text = "Search apps",
++                        text = "Search apps, or say an app name",
+                         color = Color.White.copy(alpha = 0.45f),
+-                        fontSize = 16.sp
++                        fontSize = 16.sp,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis
+                     )
+                 }
+ 
+@@ -833,6 +969,246 @@ private fun JoeTvSearchBar(
+                         }
+                 )
+             }
++
++            JoeTvMicButton(
++                isListening = isListening,
++                onClick = onVoiceSearch
++            )
++        }
++    }
++}
++
++
++/**
++ * Round microphone button that sits at the trailing edge of the search bar.
++ * Tapping it (or pressing OK while it's focused) starts voice search; a
++ * cyan → purple gradient and gentle pulse show while JoeTV is listening.
++ */
++@Composable
++private fun JoeTvMicButton(
++    isListening: Boolean,
++    onClick: () -> Unit
++) {
++    var focused by remember {
++        mutableStateOf(false)
++    }
++
++    val transition = rememberInfiniteTransition(
++        label = "JoeTvMicPulse"
++    )
++
++    val pulse by transition.animateFloat(
++        initialValue = 1f,
++        targetValue = 1.18f,
++        animationSpec = infiniteRepeatable(
++            animation = tween(650),
++            repeatMode = RepeatMode.Reverse
++        ),
++        label = "JoeTvMicPulseScale"
++    )
++
++    val scale = when {
++        isListening -> pulse
++        focused -> 1.1f
++        else -> 1f
++    }
++
++    Box(
++        modifier = Modifier
++            .size(36.dp)
++            .graphicsLayer {
++                scaleX = scale
++                scaleY = scale
++            }
++            .clip(CircleShape)
++            .background(
++                if (isListening) {
++                    Brush.linearGradient(listOf(JoeCyan, JoePurple))
++                } else {
++                    Brush.linearGradient(
++                        listOf(
++                            Color.White.copy(alpha = 0.08f),
++                            Color.White.copy(alpha = 0.08f)
++                        )
++                    )
++                }
++            )
++            .then(
++                if (focused) {
++                    Modifier.border(
++                        border = BorderStroke(2.dp, joeFocusBrush()),
++                        shape = CircleShape
++                    )
++                } else {
++                    Modifier.border(
++                        width = 1.dp,
++                        color = Color.White.copy(alpha = 0.14f),
++                        shape = CircleShape
++                    )
++                }
++            )
++            .onFocusChanged {
++                focused = it.isFocused
++            }
++            .onPreviewKeyEvent { event ->
++                if (
++                    event.type == KeyEventType.KeyDown &&
++                    (
++                            event.key == Key.DirectionCenter ||
++                                    event.key == Key.Enter ||
++                                    event.key == Key.NumPadEnter
++                            )
++                ) {
++                    onClick()
++                    true
++                } else {
++                    false
++                }
++            }
++            .focusable()
++            .clickable {
++                onClick()
++            },
++        contentAlignment = Alignment.Center
++    ) {
++        JoeTvMicIcon(
++            modifier = Modifier.size(16.dp),
++            tint = if (isListening) {
++                Color.White
++            } else {
++                Color.White.copy(alpha = 0.75f)
++            }
++        )
++    }
++}
++
++
++/**
++ * Hand-drawn microphone glyph, in the same spirit as [JoeTvSearchIcon] --
++ * avoids pulling in an icon font/library for a single icon.
++ */
++@Composable
++private fun JoeTvMicIcon(
++    modifier: Modifier = Modifier,
++    tint: Color = Color.White
++) {
++    Canvas(modifier = modifier) {
++        val w = size.width
++        val h = size.height
++        val strokeWidth = 1.6.dp.toPx()
++
++        val capsuleWidth = w * 0.42f
++        val capsuleHeight = h * 0.58f
++
++        drawRoundRect(
++            color = tint,
++            topLeft = Offset(
++                (w - capsuleWidth) / 2f,
++                0f
++            ),
++            size = Size(capsuleWidth, capsuleHeight),
++            cornerRadius = androidx.compose.ui.geometry.CornerRadius(
++                capsuleWidth / 2f
++            )
++        )
++
++        drawArc(
++            color = tint,
++            startAngle = 20f,
++            sweepAngle = 140f,
++            useCenter = false,
++            topLeft = Offset(
++                w * 0.14f,
++                capsuleHeight - h * 0.16f
++            ),
++            size = Size(w * 0.72f, h * 0.42f),
++            style = androidx.compose.ui.graphics.drawscope.Stroke(
++                width = strokeWidth
++            )
++        )
++
++        drawLine(
++            color = tint,
++            start = Offset(w / 2f, capsuleHeight + h * 0.20f),
++            end = Offset(w / 2f, h * 0.96f),
++            strokeWidth = strokeWidth
++        )
++
++        drawLine(
++            color = tint,
++            start = Offset(w * 0.28f, h * 0.96f),
++            end = Offset(w * 0.72f, h * 0.96f),
++            strokeWidth = strokeWidth
++        )
++    }
++}
++
++
++/**
++ * Full-screen overlay shown while the speech recognizer is listening.
++ * Dims the launcher behind it so it's obvious voice search is active and
++ * nothing else is focused while it's up.
++ */
++@Composable
++private fun JoeTvVoiceListeningOverlay() {
++    val transition = rememberInfiniteTransition(
++        label = "JoeTvVoiceListening"
++    )
++
++    val scale by transition.animateFloat(
++        initialValue = 1f,
++        targetValue = 1.22f,
++        animationSpec = infiniteRepeatable(
++            animation = tween(700),
++            repeatMode = RepeatMode.Reverse
++        ),
++        label = "JoeTvVoiceListeningScale"
++    )
++
++    Box(
++        modifier = Modifier
++            .fillMaxSize()
++            .background(Color.Black.copy(alpha = 0.72f)),
++        contentAlignment = Alignment.Center
++    ) {
++        Column(
++            horizontalAlignment = Alignment.CenterHorizontally
++        ) {
++            Box(
++                modifier = Modifier
++                    .size(88.dp)
++                    .graphicsLayer {
++                        scaleX = scale
++                        scaleY = scale
++                    }
++                    .clip(CircleShape)
++                    .background(
++                        Brush.linearGradient(listOf(JoeCyan, JoePurple))
++                    ),
++                contentAlignment = Alignment.Center
++            ) {
++                JoeTvMicIcon(
++                    modifier = Modifier.size(36.dp),
++                    tint = Color.White
++                )
++            }
++
++            Spacer(modifier = Modifier.height(22.dp))
++
++            Text(
++                text = "Listening…",
++                color = Color.White,
++                fontSize = 21.sp,
++                fontWeight = FontWeight.Bold
++            )
++
++            Spacer(modifier = Modifier.height(6.dp))
++
++            Text(
++                text = "Say an app name, like \"Netflix\" or \"YouTube\"",
++                color = Color.White.copy(alpha = 0.62f),
++                fontSize = 14.sp
++            )
+         }
+     }
+ }
+@@ -2636,6 +3012,91 @@ private fun launchApp(
+     }
+ }
+ 
++
++/**
++ * Interprets a phrase returned by the speech recognizer.
++ *
++ * If it closely matches an installed app's name, that app is launched
++ * directly -- this is the common case, e.g. saying "Netflix" or "YouTube".
++ * Otherwise the phrase is handed off as a normal typed search query, so
++ * anything the recognizer heard still does something useful via the
++ * existing "Search Results" section.
++ */
++private fun handleVoiceQuery(
++    spokenText: String,
++    apps: List<JoeTvApp>,
++    onLaunch: (JoeTvApp) -> Unit,
++    onSearch: (String) -> Unit
++) {
++    val cleaned = spokenText.trim()
++    if (cleaned.isBlank()) return
++
++    val bestMatch = apps
++        .map { app -> app to voiceMatchScore(cleaned, app.name) }
++        .maxByOrNull { (_, score) -> score }
++
++    if (bestMatch != null && bestMatch.second >= 0.6) {
++        onLaunch(bestMatch.first)
++    } else {
++        onSearch(cleaned)
++    }
++}
++
++
++/**
++ * Similarity score (0.0-1.0) between a spoken phrase and an app name.
++ *
++ * Speech recognition is rarely a perfect transcription, so this is
++ * deliberately forgiving: an exact match or one phrase fully containing the
++ * other (e.g. "you tube" heard for "YouTube") scores highly outright, and
++ * anything else falls back to normalized Levenshtein distance.
++ */
++private fun voiceMatchScore(
++    spoken: String,
++    appName: String
++): Double {
++    val a = spoken.lowercase().trim()
++    val b = appName.lowercase().trim()
++
++    if (a.isEmpty() || b.isEmpty()) return 0.0
++    if (a == b) return 1.0
++    if (b.contains(a) || a.contains(b)) return 0.85
++
++    val distance = levenshteinDistance(a, b)
++    val maxLength = maxOf(a.length, b.length)
++
++    return 1.0 - (distance.toDouble() / maxLength)
++}
++
++
++/**
++ * Classic edit-distance calculation: the minimum number of single-character
++ * insertions, deletions, or substitutions needed to turn [s1] into [s2].
++ */
++private fun levenshteinDistance(
++    s1: String,
++    s2: String
++): Int {
++    val dp = Array(s1.length + 1) { IntArray(s2.length + 1) }
++
++    for (i in 0..s1.length) dp[i][0] = i
++    for (j in 0..s2.length) dp[0][j] = j
++
++    for (i in 1..s1.length) {
++        for (j in 1..s2.length) {
++            val cost = if (s1[i - 1] == s2[j - 1]) 0 else 1
++
++            dp[i][j] = minOf(
++                dp[i - 1][j] + 1,
++                dp[i][j - 1] + 1,
++                dp[i - 1][j - 1] + cost
++            )
++        }
++    }
++
++    return dp[s1.length][s2.length]
++}
++
+ private fun openBluetoothSettings(context: Context) {
+     try {
+         val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+diff --git a/app/src/main/java/com/joeshannon/joetv/screens/JoeTvNavigation.kt b/app/src/main/java/com/joeshannon/joetv/screens/JoeTvNavigation.kt
+index b9646a9..5143999 100644
+--- a/app/src/main/java/com/joeshannon/joetv/screens/JoeTvNavigation.kt
++++ b/app/src/main/java/com/joeshannon/joetv/screens/JoeTvNavigation.kt
+@@ -34,4 +34,21 @@ object JoeTvNavigation {
+     fun requestHomeReset() {
+         homeResetSignal++
+     }
++
++    /**
++     * Incremented whenever something outside the composition (namely, the
++     * remote's search/voice/assist button via MainActivity.onKeyDown) asks
++     * JoeTV to start listening. HomeScreen observes this and starts the
++     * voice search flow the same way it would from the on-screen mic button.
++     */
++    var voiceSearchSignal by mutableStateOf(0)
++        private set
++
++    /**
++     * Asks JoeTV to start voice search. Safe to call from the Activity (for
++     * example from onKeyDown when the remote's mic/search button is pressed).
++     */
++    fun requestVoiceSearch() {
++        voiceSearchSignal++
++    }
+ }
+-- 
+2.43.0
+

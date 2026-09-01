@@ -152,6 +152,13 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
+    // Offline speech recognition for voice search. LineageOS TV without
+    // GApps has no system speech recognizer at all (no Google app, no
+    // "Speech Services by Google"), so JoeTV bundles its own instead of
+    // relying on RecognizerIntent resolving to something that isn't there.
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
 
