@@ -34,4 +34,21 @@ object JoeTvNavigation {
     fun requestHomeReset() {
         homeResetSignal++
     }
+
+    /**
+     * Incremented whenever something outside the composition (namely, the
+     * remote's search/voice/assist button via MainActivity.onKeyDown) asks
+     * JoeTV to start listening. HomeScreen observes this and starts the
+     * voice search flow the same way it would from the on-screen mic button.
+     */
+    var voiceSearchSignal by mutableStateOf(0)
+        private set
+
+    /**
+     * Asks JoeTV to start voice search. Safe to call from the Activity (for
+     * example from onKeyDown when the remote's mic/search button is pressed).
+     */
+    fun requestVoiceSearch() {
+        voiceSearchSignal++
+    }
 }

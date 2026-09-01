@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -67,6 +68,27 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
 
         JoeTvNavigation.requestHomeReset()
+    }
+
+    /**
+     * Lets a TV remote's dedicated mic/search/assist button start JoeTV's
+     * voice search, the same way tapping the on-screen mic button does.
+     *
+     * Different remotes map their mic button to different key codes, so all
+     * three are handled here rather than guessing which one Joe's remote
+     * sends.
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_SEARCH,
+            KeyEvent.KEYCODE_ASSIST,
+            KeyEvent.KEYCODE_VOICE_ASSIST -> {
+                JoeTvNavigation.requestVoiceSearch()
+                true
+            }
+
+            else -> super.onKeyDown(keyCode, event)
+        }
     }
 
     override fun onResume() {
