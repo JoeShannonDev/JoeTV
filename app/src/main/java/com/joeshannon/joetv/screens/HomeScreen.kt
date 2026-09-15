@@ -72,6 +72,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -81,14 +82,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import java.io.File
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.tv.material3.Text
 import java.time.LocalDateTime
-import java.net.HttpURLConnection
-import java.net.URL
-import org.json.JSONObject
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -115,10 +120,19 @@ import com.joeshannon.joetv.ui.theme.JoeBackgroundBase
 import com.joeshannon.joetv.ui.theme.JoeBackgroundBottom
 import com.joeshannon.joetv.ui.theme.JoeBackgroundMid
 import com.joeshannon.joetv.ui.theme.JoeBackgroundTop
+import com.joeshannon.joetv.ui.theme.JoeTvBackgroundStyle
+import com.joeshannon.joetv.ui.theme.currentJoeTvBackgroundStyle
 import com.joeshannon.joetv.ui.theme.JoeCyan
 import com.joeshannon.joetv.ui.theme.JoeGlowCyan
 import com.joeshannon.joetv.ui.theme.JoeGlowPurple
 import com.joeshannon.joetv.ui.theme.JoePurple
+import com.joeshannon.joetv.weather.HourlyForecast
+import com.joeshannon.joetv.weather.RadarState
+import com.joeshannon.joetv.weather.WeatherScene
+import com.joeshannon.joetv.weather.weatherSceneFor
+import com.joeshannon.joetv.weather.loadRadarState
+import com.joeshannon.joetv.weather.mostSevere
+import com.joeshannon.joetv.weather.openRadarExternally
 
 
 
@@ -166,6 +180,11 @@ fun HomeScreen(context: Context) {
         mutableStateOf(false)
     }
 
+    // True while the full-screen background-style picker is showing.
+    var showBackgrounds by remember {
+        mutableStateOf(false)
+    }
+
     // Package of the favorite currently "grabbed" for reordering, if any.
     var movingPackage by remember {
         mutableStateOf<String?>(null)
@@ -177,6 +196,7 @@ fun HomeScreen(context: Context) {
     LaunchedEffect(JoeTvNavigation.homeResetSignal) {
         showAllApps = false
         showSettings = false
+        showBackgrounds = false
         movingPackage = null
         searchQuery = ""
     }
@@ -186,6 +206,7 @@ fun HomeScreen(context: Context) {
     // with nothing saved yet is unaffected.
     LaunchedEffect(Unit) {
         restoreSavedTheme(context)
+        restoreSavedBackgroundStyle(context)
     }
 
     // True while the speech recognizer is actively listening. Drives the
@@ -634,6 +655,16 @@ fun HomeScreen(context: Context) {
         return
     }
 
+    if (showBackgrounds) {
+        BackgroundsScreen(
+            context = context,
+            onExit = {
+                showBackgrounds = false
+            }
+        )
+        return
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -669,6 +700,9 @@ fun HomeScreen(context: Context) {
                         },
                         onSettings = {
                             showSettings = true
+                        },
+                        onBackgrounds = {
+                            showBackgrounds = true
                         }
                     )
                 }
@@ -1245,10 +1279,27 @@ private fun JoeTvVoiceListeningOverlay() {
 
 
 /**
- * Animated background displayed behind the launcher.
+ * Animated background displayed behind the launcher. Dispatches to whichever
+ * style is currently selected on the Backgrounds screen (see
+ * ui/theme/BackgroundStyle.kt).
  */
 @Composable
 internal fun JoeTvMovingBackground() {
+    when (currentJoeTvBackgroundStyle) {
+        JoeTvBackgroundStyle.NEBULA -> JoeTvNebulaBackground()
+        JoeTvBackgroundStyle.AURORA -> JoeTvAuroraBackground()
+        JoeTvBackgroundStyle.STARFIELD -> JoeTvStarfieldBackground()
+        JoeTvBackgroundStyle.VIDEO -> JoeTvVideoBackground()
+    }
+}
+
+
+/**
+ * Original JoeTV background: two large soft-edged glow circles (cyan +
+ * purple) drifting slowly past each other over a dark vertical gradient.
+ */
+@Composable
+private fun JoeTvNebulaBackground() {
     val transition = rememberInfiniteTransition(
         label = "JoeTVBackground"
     )
@@ -1339,114 +1390,244 @@ internal fun JoeTvMovingBackground() {
     }
 }
 
-private data class WeatherInfo(
-    val temperature: Int,
-    val apparentTemperature: Int,
-    val high: Int,
-    val low: Int,
-    val weatherCode: Int,
-    val isDay: Boolean
-)
 
-private enum class WeatherScene {
-    CLEAR,
-    PARTLY_CLOUDY,
-    CLOUDY,
-    FOG,
-    RAIN,
-    STORM,
-    SNOW
-}
+/**
+ * Soft horizontal bands of color drifting sideways and fading in and out,
+ * like an aurora seen through a window -- calmer than Nebula's two big
+ * circles.
+ */
+@Composable
+private fun JoeTvAuroraBackground() {
+    val transition = rememberInfiniteTransition(
+        label = "JoeTvAurora"
+    )
 
+    val drift by transition.animateFloat(
+        initialValue = -70f,
+        targetValue = 70f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 18000),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "AuroraDrift"
+    )
 
+    val glow by transition.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 6000),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "AuroraGlow"
+    )
 
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        JoeBackgroundTop,
+                        JoeBackgroundMid,
+                        JoeBackgroundBottom
+                    )
+                )
+            )
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val bands = listOf(
+                Triple(JoeGlowCyan, 0.16f, 1f),
+                Triple(JoeGlowPurple, 0.42f, -1f),
+                Triple(JoeGlowCyan, 0.70f, 1f)
+            )
 
+            bands.forEach { (color, heightFraction, direction) ->
+                drawRoundRect(
+                    color = color.copy(alpha = (color.alpha * glow).coerceIn(0f, 1f)),
+                    topLeft = Offset(
+                        -size.width * 0.15f + drift * direction,
+                        size.height * heightFraction
+                    ),
+                    size = Size(
+                        size.width * 1.3f,
+                        size.height * 0.20f
+                    ),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                        size.height * 0.10f
+                    )
+                )
+            }
+        }
 
-private fun weatherSceneFor(code: Int): WeatherScene = when (code) {
-    0 -> WeatherScene.CLEAR
-    1, 2 -> WeatherScene.PARTLY_CLOUDY
-    3 -> WeatherScene.CLOUDY
-    45, 48 -> WeatherScene.FOG
-    51, 53, 55, 56, 57,
-    61, 63, 65, 66, 67,
-    80, 81, 82 -> WeatherScene.RAIN
-    71, 73, 75, 77, 85, 86 -> WeatherScene.SNOW
-    95, 96, 99 -> WeatherScene.STORM
-    else -> WeatherScene.PARTLY_CLOUDY
-}
-
-private fun weatherLabel(scene: WeatherScene): String = when (scene) {
-    WeatherScene.CLEAR -> "Clear"
-    WeatherScene.PARTLY_CLOUDY -> "Partly cloudy"
-    WeatherScene.CLOUDY -> "Cloudy"
-    WeatherScene.FOG -> "Foggy"
-    WeatherScene.RAIN -> "Rain"
-    WeatherScene.STORM -> "Thunderstorms"
-    WeatherScene.SNOW -> "Snow"
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color(0x33000000),
+                            Color(0xAA000000)
+                        )
+                    )
+                )
+        )
+    }
 }
 
 
 /**
- * Downloads the current weather from the Open-Meteo API.
+ * A quiet field of slowly twinkling stars over the same dark gradient --
+ * the "clean" option, with none of the large glow shapes the other two
+ * styles use.
  */
-private suspend fun loadWeather(): WeatherInfo? = withContext(Dispatchers.IO) {
-    /*
-     * These coordinates are Manhattan, Kansas.
-     * Change them later if you want JoeTV tied to another home location.
-     */
-    val latitude = 39.1836
-    val longitude = -96.5717
-
-    runCatching {
-        val endpoint =
-            "https://api.open-meteo.com/v1/forecast" +
-                    "?latitude=$latitude" +
-                    "&longitude=$longitude" +
-                    "&current=temperature_2m,apparent_temperature,is_day,weather_code" +
-                    "&daily=temperature_2m_max,temperature_2m_min" +
-                    "&temperature_unit=fahrenheit" +
-                    "&timezone=auto" +
-                    "&forecast_days=1"
-
-        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 6_000
-            readTimeout = 6_000
-            setRequestProperty("Accept", "application/json")
-        }
-
-        try {
-            if (connection.responseCode !in 200..299) {
-                return@runCatching null
-            }
-
-            val body = connection.inputStream
-                .bufferedReader()
-                .use { it.readText() }
-
-            val root = JSONObject(body)
-            val current = root.getJSONObject("current")
-            val daily = root.getJSONObject("daily")
-
-            WeatherInfo(
-                temperature = current.getDouble("temperature_2m").toInt(),
-                apparentTemperature =
-                    current.getDouble("apparent_temperature").toInt(),
-                high = daily.getJSONArray("temperature_2m_max")
-                    .getDouble(0)
-                    .toInt(),
-                low = daily.getJSONArray("temperature_2m_min")
-                    .getDouble(0)
-                    .toInt(),
-                weatherCode = current.getInt("weather_code"),
-                isDay = current.getInt("is_day") == 1
+@Composable
+private fun JoeTvStarfieldBackground() {
+    val stars = remember {
+        val random = kotlin.random.Random(20260915)
+        List(70) {
+            Triple(
+                random.nextFloat(),
+                random.nextFloat(),
+                0.6f + random.nextFloat() * 0.5f
             )
-        } finally {
-            connection.disconnect()
         }
-    }.getOrNull()
+    }
+
+    val transition = rememberInfiniteTransition(
+        label = "JoeTvStarfield"
+    )
+
+    val twinkle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 4000),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "Twinkle"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        JoeBackgroundTop,
+                        JoeBackgroundMid,
+                        JoeBackgroundBottom
+                    )
+                )
+            )
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            stars.forEachIndexed { index, star ->
+                val (fx, fy, baseAlpha) = star
+                val phase = (index % 5) / 5f
+                val wave = kotlin.math.sin(
+                    (twinkle + phase) * (2 * Math.PI).toFloat()
+                )
+                val alpha = (baseAlpha * (0.5f + 0.5f * wave)).coerceIn(0f, 1f)
+
+                drawCircle(
+                    color = Color.White.copy(alpha = alpha),
+                    radius = 1.6.dp.toPx(),
+                    center = Offset(size.width * fx, size.height * fy)
+                )
+            }
+        }
+    }
 }
 
+/**
+ * Looks for the first video file in the app's private "wallpapers" folder
+ * on external storage -- no runtime permission needed since it's an
+ * app-specific directory (scoped storage). Swap the loop by pushing a new
+ * file there with adb; no rebuild required. Sorted by name so a specific
+ * file can be pinned first if more than one ever lands in the folder.
+ *
+ *   adb push myloop.mp4 /sdcard/Android/data/com.joeshannon.joetv/files/wallpapers/myloop.mp4
+ *
+ * Stick to H.264 (avoid VP9/AV1) -- see the Pi 5 codec notes elsewhere in
+ * this project. HEVC works but only has partial hardware decode support.
+ */
+private val wallpaperVideoExtensions = setOf("mp4", "m4v", "mkv", "webm")
+
+private fun findWallpaperVideoFile(context: Context): File? {
+    val dir = context.getExternalFilesDir("wallpapers") ?: return null
+    if (!dir.isDirectory) {
+        return null
+    }
+
+    return dir.listFiles { file ->
+        file.isFile && file.extension.lowercase() in wallpaperVideoExtensions
+    }
+        ?.sortedBy { it.name }
+        ?.firstOrNull()
+}
+
+/**
+ * Looping muted video, cropped to fill like a desktop live-wallpaper tool.
+ * Falls back to Nebula if no video has been pushed to the wallpapers folder
+ * yet, so picking this style never produces a black screen.
+ */
+@Composable
+private fun JoeTvVideoBackground() {
+    val context = LocalContext.current
+    val videoFile = remember { findWallpaperVideoFile(context) }
+
+    if (videoFile == null) {
+        JoeTvNebulaBackground()
+        return
+    }
+
+    val exoPlayer = remember(videoFile) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(Uri.fromFile(videoFile)))
+            repeatMode = Player.REPEAT_MODE_ONE
+            volume = 0f
+            playWhenReady = true
+            prepare()
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        onDispose {
+            exoPlayer.release()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { viewContext ->
+                PlayerView(viewContext).apply {
+                    player = exoPlayer
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Same bottom-darkening treatment as the other styles, so card text
+        // and focus borders stay legible over whatever the video shows.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color(0x33000000),
+                            Color(0xAA000000)
+                        )
+                    )
+                )
+        )
+    }
+}
 
 /**
  * Chooses a hero layout based on the active display aspect ratio.
@@ -1473,7 +1654,7 @@ private fun JoeTvHero(
             context = context,
         )
     } else {
-        JoeTvHeroTablet()
+        JoeTvHeroTablet(context = context)
     }
 }
 
@@ -1482,16 +1663,9 @@ private fun JoeTvHero(
  * Shared time and weather state used by both hero layouts.
  */
 @Composable
-private fun rememberHeroState(): Triple<LocalDateTime, WeatherInfo?, String> {
+private fun rememberHeroState(): Pair<LocalDateTime, String> {
     var currentTime by remember {
         mutableStateOf(LocalDateTime.now())
-    }
-
-    val weather by produceState<WeatherInfo?>(initialValue = null) {
-        while (true) {
-            value = loadWeather()
-            delay(30 * 60 * 1_000L)
-        }
     }
 
     LaunchedEffect(Unit) {
@@ -1507,7 +1681,7 @@ private fun rememberHeroState(): Triple<LocalDateTime, WeatherInfo?, String> {
         else -> "Good evening, Joe"
     }
 
-    return Triple(currentTime, weather, greeting)
+    return Pair(currentTime, greeting)
 }
 
 
@@ -1522,7 +1696,8 @@ private fun JoeTvHeroTv(
         mutableStateOf(false)
     }
 
-    val (currentTime, weather, greeting) = rememberHeroState()
+    val (currentTime, greeting) = rememberHeroState()
+    val radarState = rememberRadarState(context)
 
     val googleCalendarApi = remember(context.applicationContext) {
         GoogleCalendarApi(context.applicationContext)
@@ -1694,28 +1869,33 @@ private fun JoeTvHeroTv(
 
             Spacer(modifier = Modifier.width(14.dp))
 
-            CalendarHeroCard(
-                event = nextEvent,
-                permissionGranted = isGoogleCalendarConnected,
+            // Weather moved here (used to be Calendar's spot) since it now
+            // shows current + hourly conditions and wants the flexible,
+            // wider slot. Calendar took weather's old fixed-width spot,
+            // widened a bit so a long event title has room to read in full.
+            RadarHeroCard(
+                state = radarState,
                 modifier = Modifier
                     .weight(1f)
-                    .widthIn(min = 175.dp)
+                    .widthIn(min = 220.dp)
                     .height(135.dp),
-                onClick = {
-                    calendarRefreshKey++
-                }
+                labelFontSize = 15.sp,
+                detailsFontSize = 10.sp,
+                alertFontSize = 10.sp,
+                tempFontSize = 26.sp,
+                hourlyFontSize = 10.sp,
+                cornerRadius = 22.dp
             )
 
             Spacer(modifier = Modifier.width(14.dp))
 
-            WeatherHeroCard(
-                weather = weather,
-                cardWidth = 175.dp,
-                cardHeight = 135.dp,
-                temperatureFontSize = 29.sp,
-                conditionFontSize = 11.sp,
-                detailsFontSize = 9.sp,
-                cornerRadius = 22.dp
+            CalendarHeroCard(
+                event = nextEvent,
+                permissionGranted = isGoogleCalendarConnected,
+                modifier = Modifier.width(250.dp),
+                onClick = {
+                    calendarRefreshKey++
+                }
             )
         }
     }
@@ -1886,12 +2066,13 @@ private fun CalendarHeroCard(
  * Original spacious hero used at the tablet's native aspect ratio.
  */
 @Composable
-private fun JoeTvHeroTablet() {
+private fun JoeTvHeroTablet(context: Context) {
     var focused by remember {
         mutableStateOf(false)
     }
 
-    val (currentTime, weather, greeting) = rememberHeroState()
+    val (currentTime, greeting) = rememberHeroState()
+    val radarState = rememberRadarState(context)
 
     val timeText = currentTime.format(
         DateTimeFormatter.ofPattern("h:mm a")
@@ -1980,121 +2161,245 @@ private fun JoeTvHeroTablet() {
             ) {
                 HeroPill(timeText)
                 HeroPill(dateText)
-                HeroPill(
-                    weather?.let {
-                        "${it.temperature}° • ${weatherLabel(weatherSceneFor(it.weatherCode))}"
-                    } ?: "Weather loading"
-                )
             }
         }
 
-        WeatherHeroCard(
-            weather = weather,
+        RadarHeroCard(
+            state = radarState,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 34.dp)
+                .width(400.dp)
+                .height(230.dp),
+            labelFontSize = 16.sp,
+            detailsFontSize = 13.sp,
+            tempFontSize = 40.sp,
+            hourlyFontSize = 12.sp,
+            showLocationFooter = true
         )
     }
 }
 
 
 /**
- * Displays the weather card shown on the right side
- * of the hero banner.
+ * Polls the radar repository on a slow cadence (RainViewer itself only
+ * refreshes about every 10 minutes) and keeps the previous frame and
+ * weather numbers on screen across a failed refresh instead of blanking
+ * the card.
  */
 @Composable
-private fun WeatherHeroCard(
-    weather: WeatherInfo?,
+private fun rememberRadarState(context: Context): RadarState? {
+    var state by remember { mutableStateOf<RadarState?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            state = loadRadarState(context, state)
+            delay(8 * 60 * 1_000L)
+        }
+    }
+
+    return state
+}
+
+
+/**
+ * Live radar + current-conditions card. Refreshes itself in the background,
+ * badges a red severe-weather alert when one is active for the resolved
+ * location, and taps through to whatever the device treats as the default
+ * handler for that spot.
+ *
+ * Sizing comes entirely from [modifier] -- callers decide whether it gets a
+ * fixed size (tablet) or a flexible one (TV hero row), which is what lets
+ * it take the wider slot now that it shows more than just a radar image.
+ */
+@Composable
+private fun RadarHeroCard(
+    state: RadarState?,
     modifier: Modifier = Modifier,
-    cardWidth: androidx.compose.ui.unit.Dp = 320.dp,
-    cardHeight: androidx.compose.ui.unit.Dp = 210.dp,
-    temperatureFontSize: androidx.compose.ui.unit.TextUnit = 42.sp,
-    conditionFontSize: androidx.compose.ui.unit.TextUnit = 15.sp,
+    labelFontSize: androidx.compose.ui.unit.TextUnit = 15.sp,
     detailsFontSize: androidx.compose.ui.unit.TextUnit = 12.sp,
-    cornerRadius: androidx.compose.ui.unit.Dp = 30.dp
+    alertFontSize: androidx.compose.ui.unit.TextUnit = 10.sp,
+    tempFontSize: androidx.compose.ui.unit.TextUnit = 30.sp,
+    hourlyFontSize: androidx.compose.ui.unit.TextUnit = 11.sp,
+    cornerRadius: androidx.compose.ui.unit.Dp = 30.dp,
+    showLocationFooter: Boolean = false
 ) {
-    val scene = weather?.let {
-        weatherSceneFor(it.weatherCode)
-    } ?: WeatherScene.PARTLY_CLOUDY
+    val context = LocalContext.current
+    var focused by remember { mutableStateOf(false) }
 
-    val isDay = weather?.isDay ?: true
-
-    val cardColors = when {
-        !isDay -> listOf(
-            Color(0xFF202B55),
-            Color(0xFF131A36)
-        )
-        scene == WeatherScene.CLEAR -> listOf(
-            Color(0xFF4C91FF),
-            Color(0xFF6B65F6)
-        )
-        scene == WeatherScene.RAIN ||
-                scene == WeatherScene.STORM -> listOf(
-            Color(0xFF46627F),
-            Color(0xFF28364D)
-        )
-        scene == WeatherScene.SNOW -> listOf(
-            Color(0xFF73B7D8),
-            Color(0xFF486F91)
-        )
-        else -> listOf(
-            Color(0xFF527DCC),
-            Color(0xFF5159B2)
-        )
+    val alert = state?.alerts?.mostSevere()
+    val minutesAgo = state?.generatedAtMillis?.let { generatedAt ->
+        if (generatedAt <= 0L) null else (System.currentTimeMillis() - generatedAt) / 60_000L
     }
 
     Box(
         modifier = modifier
-            .size(
-                width = cardWidth,
-                height = cardHeight
-            )
             .clip(RoundedCornerShape(cornerRadius))
-            .background(
-                Brush.linearGradient(cardColors)
-            )
+            .background(Color(0xFF10182B))
             .border(
-                width = 1.dp,
-                color = Color.White.copy(alpha = 0.18f),
+                width = if (alert != null) 2.dp else 1.dp,
+                color = if (alert != null) {
+                    Color(0xFFEF4444)
+                } else {
+                    Color.White.copy(alpha = 0.18f)
+                },
                 shape = RoundedCornerShape(cornerRadius)
             )
+            .then(
+                if (focused) {
+                    Modifier.border(
+                        border = BorderStroke(2.dp, joeFocusBrush()),
+                        shape = RoundedCornerShape(cornerRadius)
+                    )
+                } else {
+                    Modifier
+                }
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .clickable {
+                state?.let { openRadarExternally(context, it) }
+            }
     ) {
-        WeatherIllustration(
-            scene = scene,
-            isDay = isDay,
-            modifier = Modifier.fillMaxSize()
-        )
+        if (state?.image != null) {
+            Image(
+                bitmap = state.image.asImageBitmap(),
+                contentDescription = "Weather radar near ${state.locationLabel}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(
-                    start = 22.dp,
-                    bottom = 18.dp
+            // Scrim top-to-bottom so both the temp readout up top and the
+            // hourly strip down below stay legible over whatever the radar
+            // colors happen to be underneath them.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.35f),
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.65f)
+                            )
+                        )
+                    )
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF26324A), Color(0xFF161C2A))
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Loading weather…",
+                    color = Color.White.copy(alpha = 0.70f),
+                    fontSize = detailsFontSize
                 )
+            }
+        }
+
+        // Current temp + condition + high/low, top-left.
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 18.dp, top = 14.dp, end = 90.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = weather?.let { "${it.temperature}°" } ?: "--°",
+                text = state?.currentTemperature?.let { "$it°" } ?: "--°",
                 color = Color.White,
-                fontSize = temperatureFontSize,
+                fontSize = tempFontSize,
                 fontWeight = FontWeight.Bold
             )
 
-            Text(
-                text = weather?.let {
-                    weatherLabel(scene)
-                } ?: "Loading weather",
-                color = Color.White.copy(alpha = 0.88f),
-                fontSize = conditionFontSize,
-                fontWeight = FontWeight.SemiBold
-            )
+            Spacer(modifier = Modifier.width(10.dp))
 
-            if (weather != null) {
-                Spacer(modifier = Modifier.height(3.dp))
+            Column {
+                Text(
+                    text = state?.conditionLabel ?: "Loading…",
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = detailsFontSize,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (state?.highTemperature != null && state.lowTemperature != null) {
+                    Text(
+                        text = "H ${state.highTemperature}°  •  L ${state.lowTemperature}°",
+                        color = Color.White.copy(alpha = 0.65f),
+                        fontSize = detailsFontSize
+                    )
+                }
+            }
+        }
+
+        if (alert != null) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(10.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(0xFFEF4444))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = alert.event.uppercase(),
+                    color = Color.White,
+                    fontSize = alertFontSize,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        // Next few hours, bottom.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
+        ) {
+            if (state != null && state.hourly.isNotEmpty()) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(state.hourly.take(6)) { hour ->
+                        HourlyForecastChip(
+                            hour = hour,
+                            fontSize = hourlyFontSize
+                        )
+                    }
+                }
+            }
+
+            if (showLocationFooter) {
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "H ${weather.high}°  •  L ${weather.low}°",
-                    color = Color.White.copy(alpha = 0.66f),
+                    text = state?.locationLabel ?: "Radar",
+                    color = Color.White.copy(alpha = 0.80f),
+                    fontSize = detailsFontSize,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Text(
+                    text = when {
+                        minutesAgo == null -> "Live radar"
+                        minutesAgo <= 0L -> "Updated just now"
+                        else -> "Updated ${minutesAgo}m ago"
+                    },
+                    color = Color.White.copy(alpha = 0.60f),
                     fontSize = detailsFontSize
                 )
             }
@@ -2104,275 +2409,59 @@ private fun WeatherHeroCard(
 
 
 /**
- * Draws the animated weather artwork.
+ * One hour of the forecast strip: hour label, a small dot colored by
+ * condition, and the temperature.
  */
 @Composable
-private fun WeatherIllustration(
-    scene: WeatherScene,
-    isDay: Boolean,
-    modifier: Modifier = Modifier
+private fun HourlyForecastChip(
+    hour: HourlyForecast,
+    fontSize: androidx.compose.ui.unit.TextUnit
 ) {
-    val transition = rememberInfiniteTransition(
-        label = "WeatherAnimation"
-    )
-
-    val drift by transition.animateFloat(
-        initialValue = -6f,
-        targetValue = 7f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4_500),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "CloudDrift"
-    )
-
-    val rainOffset by transition.animateFloat(
-        initialValue = -12f,
-        targetValue = 22f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 850),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "Rain"
-    )
-
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-
-        // Soft atmospheric glow.
-        drawCircle(
-            color = Color.White.copy(alpha = 0.08f),
-            radius = w * 0.40f,
-            center = Offset(w * 0.86f, h * 0.10f)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black.copy(alpha = 0.30f))
+            .padding(horizontal = 7.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = hour.label,
+            color = Color.White.copy(alpha = 0.75f),
+            fontSize = fontSize
         )
 
-        if (isDay) {
-            drawCircle(
-                color = Color(0xFFFFDC72),
-                radius = 29.dp.toPx(),
-                center = Offset(w * 0.75f, h * 0.30f)
-            )
-            drawCircle(
-                color = Color(0xFFFFF1B0).copy(alpha = 0.30f),
-                radius = 41.dp.toPx(),
-                center = Offset(w * 0.75f, h * 0.30f)
-            )
-        } else {
-            drawCircle(
-                color = Color(0xFFFFF2C7),
-                radius = 25.dp.toPx(),
-                center = Offset(w * 0.76f, h * 0.28f)
-            )
-            drawCircle(
-                color = cardBackgroundApprox(scene),
-                radius = 23.dp.toPx(),
-                center = Offset(w * 0.80f, h * 0.24f)
-            )
+        Spacer(modifier = Modifier.height(3.dp))
 
-            listOf(
-                Offset(w * 0.59f, h * 0.18f),
-                Offset(w * 0.87f, h * 0.16f),
-                Offset(w * 0.92f, h * 0.38f)
-            ).forEach {
-                drawCircle(
-                    color = Color.White.copy(alpha = 0.72f),
-                    radius = 1.6.dp.toPx(),
-                    center = it
-                )
-            }
-        }
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(sceneDotColor(weatherSceneFor(hour.weatherCode)))
+        )
 
-        when (scene) {
-            WeatherScene.CLEAR -> {
-                // Sun/moon is enough; keep this condition clean.
-            }
+        Spacer(modifier = Modifier.height(3.dp))
 
-            WeatherScene.PARTLY_CLOUDY,
-            WeatherScene.CLOUDY,
-            WeatherScene.RAIN,
-            WeatherScene.STORM,
-            WeatherScene.SNOW -> {
-                val cloudX = w * 0.66f + drift.dp.toPx()
-                val cloudY = h * 0.43f
-
-                val cloudColor = when (scene) {
-                    WeatherScene.STORM -> Color(0xFFD2DAE8)
-                    WeatherScene.RAIN -> Color(0xFFE4EBF5)
-                    else -> Color.White
-                }
-
-                drawCloud(
-                    center = Offset(cloudX, cloudY),
-                    cloudColor = cloudColor
-                )
-
-                if (scene == WeatherScene.CLOUDY) {
-                    drawCloud(
-                        center = Offset(
-                            w * 0.80f - drift.dp.toPx(),
-                            h * 0.32f
-                        ),
-                        scale = 0.72f,
-                        cloudColor = Color.White.copy(alpha = 0.74f)
-                    )
-                }
-
-                if (scene == WeatherScene.RAIN ||
-                    scene == WeatherScene.STORM
-                ) {
-                    repeat(4) { index ->
-                        val x = cloudX - 40.dp.toPx() +
-                                index * 25.dp.toPx()
-                        val y = cloudY + 30.dp.toPx() +
-                                rainOffset.dp.toPx()
-
-                        drawLine(
-                            color = Color(0xFFB9E8FF),
-                            start = Offset(x, y),
-                            end = Offset(
-                                x - 6.dp.toPx(),
-                                y + 14.dp.toPx()
-                            ),
-                            strokeWidth = 3.dp.toPx()
-                        )
-                    }
-                }
-
-                if (scene == WeatherScene.STORM) {
-                    val lightning = Path().apply {
-                        moveTo(
-                            cloudX + 3.dp.toPx(),
-                            cloudY + 24.dp.toPx()
-                        )
-                        lineTo(
-                            cloudX - 10.dp.toPx(),
-                            cloudY + 51.dp.toPx()
-                        )
-                        lineTo(
-                            cloudX + 2.dp.toPx(),
-                            cloudY + 48.dp.toPx()
-                        )
-                        lineTo(
-                            cloudX - 7.dp.toPx(),
-                            cloudY + 72.dp.toPx()
-                        )
-                        lineTo(
-                            cloudX + 21.dp.toPx(),
-                            cloudY + 40.dp.toPx()
-                        )
-                        lineTo(
-                            cloudX + 8.dp.toPx(),
-                            cloudY + 43.dp.toPx()
-                        )
-                        close()
-                    }
-
-                    drawPath(
-                        path = lightning,
-                        color = Color(0xFFFFE66D)
-                    )
-                }
-
-                if (scene == WeatherScene.SNOW) {
-                    repeat(5) { index ->
-                        val x = cloudX - 48.dp.toPx() +
-                                index * 24.dp.toPx()
-                        val y = cloudY + 44.dp.toPx() +
-                                ((index % 2) * 14).dp.toPx()
-
-                        drawCircle(
-                            color = Color.White.copy(alpha = 0.92f),
-                            radius = 3.1.dp.toPx(),
-                            center = Offset(x, y)
-                        )
-                    }
-                }
-            }
-
-            WeatherScene.FOG -> {
-                repeat(4) { index ->
-                    val top = h * 0.26f +
-                            index * 18.dp.toPx()
-                    drawRoundRect(
-                        color = Color.White.copy(
-                            alpha = 0.50f - index * 0.07f
-                        ),
-                        topLeft = Offset(
-                            w * 0.52f +
-                                    if (index % 2 == 0) drift.dp.toPx()
-                                    else -drift.dp.toPx(),
-                            top
-                        ),
-                        size = Size(
-                            width = w * (0.36f - index * 0.025f),
-                            height = 7.dp.toPx()
-                        ),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(
-                            20.dp.toPx()
-                        )
-                    )
-                }
-            }
-        }
+        Text(
+            text = "${hour.temperature}°",
+            color = Color.White,
+            fontSize = fontSize,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCloud(
-    center: Offset,
-    scale: Float = 1f,
-    cloudColor: Color
-) {
-    val baseWidth = 128.dp.toPx() * scale
-    val baseHeight = 39.dp.toPx() * scale
 
-    drawRoundRect(
-        color = cloudColor,
-        topLeft = Offset(
-            center.x - baseWidth / 2,
-            center.y - 2.dp.toPx() * scale
-        ),
-        size = Size(baseWidth, baseHeight),
-        cornerRadius = androidx.compose.ui.geometry.CornerRadius(
-            28.dp.toPx() * scale
-        )
-    )
-
-    drawCircle(
-        color = cloudColor,
-        radius = 31.dp.toPx() * scale,
-        center = Offset(
-            center.x - 27.dp.toPx() * scale,
-            center.y - 7.dp.toPx() * scale
-        )
-    )
-
-    drawCircle(
-        color = cloudColor,
-        radius = 39.dp.toPx() * scale,
-        center = Offset(
-            center.x + 12.dp.toPx() * scale,
-            center.y - 19.dp.toPx() * scale
-        )
-    )
-
-    drawCircle(
-        color = cloudColor,
-        radius = 26.dp.toPx() * scale,
-        center = Offset(
-            center.x + 46.dp.toPx() * scale,
-            center.y - 5.dp.toPx() * scale
-        )
-    )
-}
-
-private fun cardBackgroundApprox(
-    scene: WeatherScene
-): Color = when (scene) {
-    WeatherScene.RAIN,
-    WeatherScene.STORM -> Color(0xFF394C67)
-    WeatherScene.SNOW -> Color(0xFF5A8DA8)
-    else -> Color(0xFF405E9F)
+/**
+ * Small color cue for the hourly strip's condition dot -- not a full icon
+ * set, just enough to tell "clear" from "storm" at a glance.
+ */
+private fun sceneDotColor(scene: WeatherScene): Color = when (scene) {
+    WeatherScene.CLEAR -> Color(0xFFFFDC72)
+    WeatherScene.PARTLY_CLOUDY, WeatherScene.CLOUDY -> Color(0xFFB8C4D9)
+    WeatherScene.FOG -> Color(0xFFCBD5E1)
+    WeatherScene.RAIN -> Color(0xFF60A5FA)
+    WeatherScene.STORM -> Color(0xFFFACC15)
+    WeatherScene.SNOW -> Color(0xFFE0F2FE)
 }
 
 @Composable
@@ -3190,7 +3279,8 @@ private fun openSoundAssistant(context: Context) {
 private fun JoeTvHomeActions(
     appCount: Int,
     onAllApps: () -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    onBackgrounds: () -> Unit
 ) {
     Row(
         modifier = Modifier.padding(
@@ -3213,6 +3303,13 @@ private fun JoeTvHomeActions(
         JoeTvPillButton(
             label = "Themes",
             onClick = onSettings
+        )
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        JoeTvPillButton(
+            label = "Backgrounds",
+            onClick = onBackgrounds
         )
     }
 }

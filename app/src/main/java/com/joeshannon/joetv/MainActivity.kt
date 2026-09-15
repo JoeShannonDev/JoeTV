@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -15,6 +16,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.joeshannon.joetv.screens.HomeScreen
 import com.joeshannon.joetv.screens.JoeTvNavigation
 import com.joeshannon.joetv.ui.theme.JoeTVTheme
+import com.joeshannon.joetv.util.AppRestart
 
 class MainActivity : ComponentActivity() {
 
@@ -79,10 +81,16 @@ class MainActivity : ComponentActivity() {
      * sends.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_DEL && event?.repeatCount == 0) {
+            AppRestart.softRestart(this)
+            return true
+        }
+
         return when (keyCode) {
             KeyEvent.KEYCODE_SEARCH,
             KeyEvent.KEYCODE_ASSIST,
             KeyEvent.KEYCODE_VOICE_ASSIST -> {
+                Log.d("JoeTvMainActivity", "Matched voice-search key, requesting voice search")
                 JoeTvNavigation.requestVoiceSearch()
                 true
             }

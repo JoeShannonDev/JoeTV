@@ -1,6 +1,7 @@
 package com.joeshannon.joetv.services
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import org.json.JSONObject
@@ -76,15 +77,19 @@ class VoiceRecognizer(
         if (hasStartedLoading) return
         hasStartedLoading = true
 
+        Log.d(TAG, "Starting model unpack from assets/model-en-us")
+
         StorageService.unpack(
             appContext,
             "model-en-us",
             "model",
             { unpackedModel ->
+                Log.d(TAG, "Model unpack succeeded, ready to listen")
                 model = unpackedModel
                 _state.value = VoiceRecognizerState.Ready
             },
             { exception ->
+                Log.e(TAG, "Model unpack failed", exception)
                 _state.value = VoiceRecognizerState.Failed(
                     exception.message ?: "Failed to load the voice model"
                 )
@@ -107,7 +112,23 @@ class VoiceRecognizer(
         val loadedModel = model
 
         if (loadedModel == null) {
-            onError("Voice model is still loading -- try again in a moment")
+            // This used to always say "still loading" regardless of what
+            // actually happened -- if unpacking failed outright, that real
+            // reason was silently swallowed and this generic message shown
+            // instead, forever. Surface whatever state.value actually is.
+            val message = when (val current = _state.value) {
+                is VoiceRecognizerState.Loading ->
+                    "Voice model is still loading -- try again in a moment"
+                is VoiceRecognizerState.Failed ->
+                    "Voice model failed to load: ${current.message}"
+                is VoiceRecognizerState.Ready ->
+                    // Should be unreachable (model would be non-null), but
+                    // fall back to something informative rather than lying.
+                    "Voice model reported ready but has no model loaded"
+            }
+
+            Log.e(TAG, "startListening() called with no model: $message")
+            onError(message)
             return
         }
 
@@ -121,14 +142,26 @@ class VoiceRecognizer(
 
         var resultDelivered = false
 
+        Log.d(TAG, "startListening: mic session starting (timeout ${LISTEN_TIMEOUT_MS}ms)")
+
+        // Without an explicit timeout this listens forever -- if the Pi has
+        // no working microphone input at all, RecognitionListener never
+        // fires anything and the "Listening..." overlay would be stuck
+        // permanently with no feedback. The timeout guarantees onTimeout()
+        // fires and the user gets a message either way.
         service.startListening(object : RecognitionListener {
 
             override fun onPartialResult(hypothesis: String) {
-                // Not surfaced -- JoeTV only acts on the final transcript for
-                // one phrase per mic tap, not live partials.
+                // Not surfaced to the UI -- JoeTV only acts on the final
+                // transcript for one phrase per mic tap, not live partials.
+                // Logged anyway: partials firing at all is the clearest
+                // signal the mic is actually picking up audio.
+                Log.d(TAG, "onPartialResult: $hypothesis")
             }
 
             override fun onResult(hypothesis: String) {
+                Log.d(TAG, "onResult: $hypothesis")
+
                 // SpeechService calls this once per detected pause in
                 // speech and keeps listening afterward. JoeTV only wants a
                 // single phrase per mic tap, so the first result ends the
@@ -141,6 +174,8 @@ class VoiceRecognizer(
             }
 
             override fun onFinalResult(hypothesis: String) {
+                Log.d(TAG, "onFinalResult: $hypothesis")
+
                 if (resultDelivered) return
                 resultDelivered = true
 
@@ -148,19 +183,22 @@ class VoiceRecognizer(
             }
 
             override fun onError(exception: Exception) {
+                Log.e(TAG, "onError during listening", exception)
                 resultDelivered = true
                 stopListening()
                 onError(exception.message ?: "Voice recognition failed")
             }
 
             override fun onTimeout() {
+                Log.d(TAG, "onTimeout fired -- ${LISTEN_TIMEOUT_MS}ms passed with no usable result")
+
                 if (resultDelivered) return
                 resultDelivered = true
 
                 stopListening()
                 onError("Didn't catch that -- try again")
             }
-        })
+        }, LISTEN_TIMEOUT_MS)
     }
 
 
@@ -217,6 +255,8 @@ class VoiceRecognizer(
 
 
     companion object {
+        private const val TAG = "JoeTvVoiceRecognizer"
         private const val SAMPLE_RATE = 16000.0f
+        private const val LISTEN_TIMEOUT_MS = 8000
     }
 }

@@ -10,13 +10,21 @@ package com.joeshannon.joetv.screens
 // card in HomeScreen.kt), and persists the choice so it survives a restart.
 // -----------------------------------------------------------------------------
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +42,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,7 +55,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
@@ -56,6 +67,21 @@ import com.joeshannon.joetv.ui.theme.JoeTvTheme
 import com.joeshannon.joetv.ui.theme.applyJoeTvTheme
 import com.joeshannon.joetv.ui.theme.currentJoeTvTheme
 import com.joeshannon.joetv.ui.theme.paletteFor
+import com.joeshannon.joetv.weather.GeocodeResult
+import com.joeshannon.joetv.weather.RADAR_MAX_ZOOM
+import com.joeshannon.joetv.weather.RADAR_MIN_ZOOM
+import com.joeshannon.joetv.weather.RadarLocation
+import com.joeshannon.joetv.weather.getCleanVisuals
+import com.joeshannon.joetv.weather.getPinnedRadarLocation
+import com.joeshannon.joetv.weather.getRadarZoom
+import com.joeshannon.joetv.weather.RadarLocationMode
+import com.joeshannon.joetv.weather.getRadarLocationMode
+import com.joeshannon.joetv.weather.searchLocations
+import com.joeshannon.joetv.weather.setCleanVisuals
+import com.joeshannon.joetv.weather.setPinnedRadarLocation
+import com.joeshannon.joetv.weather.setRadarZoom
+import com.joeshannon.joetv.weather.setRadarLocationMode
+import kotlinx.coroutines.delay
 
 /**
  * Key under JoeTV's existing "joetv_preferences" SharedPreferences file. Read
@@ -179,6 +205,11 @@ internal fun SettingsScreen(
                     }
                 )
             }
+
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Spacer(modifier = Modifier.height(10.dp))
+                RadarSettingsSection(context = context)
+            }
         }
     }
 }
@@ -281,3 +312,225 @@ private fun ThemeCard(
     }
 }
 
+
+
+/**
+ * Radar widget controls: GPS lock vs. a pinned location, zoom level, and
+ * the "clean visuals" light-precipitation filter. Backed by the same
+ * "joetv_preferences" file as the theme choice above (see
+ * weather/RadarPreferences.kt).
+ */
+@Composable
+private fun RadarSettingsSection(context: Context) {
+    var locationMode by remember { mutableStateOf(getRadarLocationMode(context)) }
+    var zoom by remember { mutableStateOf(getRadarZoom(context)) }
+    var cleanVisuals by remember { mutableStateOf(getCleanVisuals(context)) }
+    var pinnedLocation by remember { mutableStateOf(getPinnedRadarLocation(context)) }
+
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<GeocodeResult>>(emptyList()) }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            locationMode = RadarLocationMode.GPS
+            setRadarLocationMode(context, RadarLocationMode.GPS)
+        }
+    }
+
+    // Debounced so typing a city name doesn't fire a geocoding request on
+    // every keystroke.
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.length < 2) {
+            searchResults = emptyList()
+            return@LaunchedEffect
+        }
+
+        delay(400)
+
+        searchResults = runCatching {
+            searchLocations(searchQuery)
+        }.getOrDefault(emptyList())
+    }
+
+    Column {
+        Text(
+            text = "Radar Location",
+            color = Color.White,
+            fontSize = 27.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Text(
+            text = "Powers the live radar card in the hero banner",
+            color = Color.White.copy(alpha = 0.55f),
+            fontSize = 14.sp
+        )
+
+        Spacer(modifier = Modifier.height(22.dp))
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            JoeTvPillButton(
+                label = when (locationMode) {
+                    RadarLocationMode.PINNED -> "Location: Pinned"
+                    RadarLocationMode.GPS -> "Location: Current (GPS)"
+                    RadarLocationMode.AUTO_IP -> "Location: Auto (Network)"
+                },
+                onClick = {
+                    val nextMode = when (locationMode) {
+                        RadarLocationMode.PINNED -> RadarLocationMode.GPS
+                        RadarLocationMode.GPS -> RadarLocationMode.AUTO_IP
+                        RadarLocationMode.AUTO_IP -> RadarLocationMode.PINNED
+                    }
+
+                    if (nextMode == RadarLocationMode.GPS) {
+                        val hasPermission = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        ) == PackageManager.PERMISSION_GRANTED
+
+                        if (hasPermission) {
+                            locationMode = RadarLocationMode.GPS
+                            setRadarLocationMode(context, RadarLocationMode.GPS)
+                        } else {
+                            locationPermissionLauncher.launch(
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        }
+                    } else {
+                        locationMode = nextMode
+                        setRadarLocationMode(context, nextMode)
+                    }
+                }
+            )
+
+            JoeTvPillButton(
+                label = if (cleanVisuals) "Clean visuals: On" else "Clean visuals: Off",
+                onClick = {
+                    cleanVisuals = !cleanVisuals
+                    setCleanVisuals(context, cleanVisuals)
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Zoom",
+                color = Color.White.copy(alpha = 0.75f),
+                fontSize = 15.sp
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            JoeTvPillButton(
+                label = "−",
+                onClick = {
+                    zoom = (zoom - 1).coerceIn(RADAR_MIN_ZOOM, RADAR_MAX_ZOOM)
+                    setRadarZoom(context, zoom)
+                }
+            )
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Text(
+                text = zoom.toString(),
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            JoeTvPillButton(
+                label = "+",
+                onClick = {
+                    zoom = (zoom + 1).coerceIn(RADAR_MIN_ZOOM, RADAR_MAX_ZOOM)
+                    setRadarZoom(context, zoom)
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(22.dp))
+
+        if (locationMode == RadarLocationMode.PINNED) {
+            Text(
+                text = "Pinned: ${pinnedLocation.label}",
+                color = Color.White.copy(alpha = 0.75f),
+                fontSize = 15.sp
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.55f)
+                .height(50.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.06f))
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.10f),
+                    shape = RoundedCornerShape(50)
+                )
+                .padding(horizontal = 20.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            if (searchQuery.isEmpty()) {
+                Text(
+                    text = "Search a city to pin the radar there…",
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 14.sp
+                )
+            }
+
+            BasicTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                singleLine = true,
+                textStyle = TextStyle(
+                    color = Color.White,
+                    fontSize = 14.sp
+                ),
+                cursorBrush = joeFocusBrush(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                interactionSource = remember { MutableInteractionSource() },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        if (searchResults.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                searchResults.forEach { result ->
+                    JoeTvPillButton(
+                        label = result.label,
+                        onClick = {
+                            val newLocation = RadarLocation(
+                                latitude = result.latitude,
+                                longitude = result.longitude,
+                                label = result.label
+                            )
+                            setPinnedRadarLocation(context, newLocation)
+                            pinnedLocation = newLocation
+                            locationMode = RadarLocationMode.PINNED
+                            setRadarLocationMode(context, RadarLocationMode.PINNED)
+                            searchQuery = ""
+                            searchResults = emptyList()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
